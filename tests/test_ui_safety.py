@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -109,19 +110,19 @@ def test_three_boxes_offer_individual_and_combined_recognition() -> None:
     window.base_images[path] = image
     window.preview.set_image(image, document.boxes)
     window._load_fields(document)
-    responses = iter(
-        [
-            ("B.0096.02.036", 0.99),
-            ("冷端", 0.98),
-            ("CP41.000 (C02)", 0.97),
-        ]
-    )
+    def recognize_batch(_images, progress_callback=None):  # type: ignore[no-untyped-def]
+        values = {
+            FieldKind.MATERIAL: ("B.0096.02.036", 0.99),
+            FieldKind.NAME: ("冷端", 0.98),
+            FieldKind.PROCESS: ("CP41.000 (C02)", 0.97),
+        }
+        for index, kind in enumerate(FieldKind, start=1):
+            if progress_callback is not None:
+                progress_callback(index, len(FieldKind), kind.value)
+            time.sleep(0.04)
+        return values
 
-    def recognize(_image: Image.Image) -> tuple[str, float]:
-        time.sleep(0.04)
-        return next(responses)
-
-    window.ocr.recognize_text = recognize  # type: ignore[method-assign]
+    window.ocr.recognize_batch = recognize_batch  # type: ignore[method-assign]
     individual_buttons = [button for button in window.findChildren(QPushButton) if button.text() == "仅识别此框"]
 
     assert len(individual_buttons) == 3
@@ -139,6 +140,127 @@ def test_three_boxes_offer_individual_and_combined_recognition() -> None:
     assert document.fields[FieldKind.PROCESS].text == "CP41.000 (C02)"
     assert window.ocr_progress.value() == 3
     assert window.ocr_progress.format() == "识别完成 3/3"
+    window.close()
+
+
+def test_primary_button_queues_ocr_and_immediately_opens_next_document() -> None:
+    app = _application()
+    window = MainWindow()
+    first_path = Path("first.pdf")
+    second_path = Path("second.pdf")
+    first = DrawingDocument(first_path)
+    second = DrawingDocument(second_path)
+    first.boxes = {
+        FieldKind.MATERIAL: NormalizedRect(0.1, 0.1, 0.3, 0.1),
+        FieldKind.NAME: NormalizedRect(0.1, 0.3, 0.3, 0.1),
+        FieldKind.PROCESS: NormalizedRect(0.1, 0.5, 0.3, 0.1),
+    }
+    window.documents = [first, second]
+    window.current_index = 0
+    for path in (first_path, second_path):
+        window._cache_base_image(path, Image.new("RGB", (1000, 800), "white"))
+    window.preview.set_image(window.base_images[first_path], first.boxes)
+    window._refresh_list()
+    window._load_fields(first)
+
+    def recognize_batch(_images, progress_callback=None):  # type: ignore[no-untyped-def]
+        for index, kind in enumerate(FieldKind, start=1):
+            if progress_callback is not None:
+                progress_callback(index, len(FieldKind), kind.value)
+            time.sleep(0.04)
+        return {
+            FieldKind.MATERIAL: ("B.0044.02.017", 0.99),
+            FieldKind.NAME: ("泵体", 0.98),
+            FieldKind.PROCESS: ("CP41.100A", 0.97),
+        }
+
+    window.ocr.recognize_batch = recognize_batch  # type: ignore[method-assign]
+
+    assert window.confirm_button.text() == "识别并下一份"
+    window.confirm_button.click()
+    app.processEvents()
+
+    assert window.current_document is second
+    assert first.status in (DocumentStatus.OCR_QUEUED, DocumentStatus.OCR_RUNNING)
+    assert not first.all_fields_filled
+
+    deadline = time.monotonic() + 3
+    while window._background_ocr_active and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+
+    assert not window._background_ocr_active
+    assert first.status == DocumentStatus.NEEDS_CONFIRMATION
+    assert first.fields[FieldKind.MATERIAL].text == "B.0044.02.017"
+    assert window.current_document is second
+    window.close()
+
+
+def test_full_page_preview_cache_is_limited_to_three_documents() -> None:
+    _application()
+    window = MainWindow()
+    paths = [Path(f"drawing-{index}.pdf") for index in range(4)]
+    for path in paths:
+        window._cache_base_image(path, Image.new("RGB", (100, 100), "white"))
+
+    assert len(window.base_images) == 3
+    assert paths[0] not in window.base_images
+    assert set(window.base_images) == set(paths[1:])
+    window.close()
+
+
+def test_changed_boxes_discard_old_result_but_keep_replacement_job() -> None:
+    app = _application()
+    window = MainWindow()
+    path = Path("revision.pdf")
+    document = DrawingDocument(path)
+    document.boxes = {
+        FieldKind.MATERIAL: NormalizedRect(0.1, 0.1, 0.3, 0.1),
+        FieldKind.NAME: NormalizedRect(0.1, 0.3, 0.3, 0.1),
+        FieldKind.PROCESS: NormalizedRect(0.1, 0.5, 0.3, 0.1),
+    }
+    window.documents = [document]
+    window.current_index = 0
+    image = Image.new("RGB", (1000, 800), "white")
+    window._cache_base_image(path, image)
+    window.preview.set_image(image, document.boxes)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+
+    def recognize_batch(_images, _progress_callback=None):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_started.set()
+            release_first.wait(2)
+            material = "OLD"
+        else:
+            material = "B.0044.02.017"
+        return {
+            FieldKind.MATERIAL: (material, 0.99),
+            FieldKind.NAME: ("泵体", 0.98),
+            FieldKind.PROCESS: ("CP41.100A", 0.97),
+        }
+
+    window.ocr.recognize_batch = recognize_batch  # type: ignore[method-assign]
+    assert window._enqueue_background_ocr(document)
+    assert first_started.wait(1)
+
+    document.boxes[FieldKind.MATERIAL] = NormalizedRect(0.2, 0.1, 0.3, 0.1)
+    document.ocr_revision += 1
+    document.status = DocumentStatus.NEEDS_CONFIRMATION
+    assert window._enqueue_background_ocr(document)
+    release_first.set()
+
+    deadline = time.monotonic() + 3
+    while window._background_ocr_active and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.01)
+
+    assert calls == 2
+    assert document.fields[FieldKind.MATERIAL].text == "B.0044.02.017"
+    assert document.status == DocumentStatus.NEEDS_CONFIRMATION
     window.close()
 
 

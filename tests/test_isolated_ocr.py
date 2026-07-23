@@ -6,6 +6,7 @@ import pytest
 from PIL import Image
 
 from drawing_renamer.isolated_ocr import IsolatedOcrService, OcrCancelledError
+from drawing_renamer.models import FieldKind
 from drawing_renamer.ocr_service import OcrUnavailableError
 
 
@@ -33,6 +34,54 @@ def test_recognize_text_reads_child_process_result(monkeypatch) -> None:  # type
     text, confidence = IsolatedOcrService().recognize_text(Image.new("RGB", (20, 20), "white"))
     assert text == "B.001"
     assert confidence == 0.98
+
+
+def test_batch_recognition_uses_one_child_process_and_returns_all_fields(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    starts = 0
+
+    class FakeBatchProcess:
+        pid = 321
+        returncode = 0
+
+        def __init__(self, command, **_kwargs):  # type: ignore[no-untyped-def]
+            nonlocal starts
+            starts += 1
+            manifest = json.loads(Path(command[4]).read_text(encoding="utf-8"))
+            assert set(manifest) == {kind.value for kind in FieldKind}
+            Path(command[5]).write_text(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "values": {
+                                FieldKind.MATERIAL.value: ["B.001", 0.98],
+                                FieldKind.NAME.value: ["泵体", 0.97],
+                                FieldKind.PROCESS.value: ["CP41.100A", 0.96],
+                            }
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+        def communicate(self, timeout=None):  # type: ignore[no-untyped-def]
+            return "", ""
+
+        def poll(self):  # type: ignore[no-untyped-def]
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    monkeypatch.setattr("drawing_renamer.isolated_ocr.subprocess.Popen", FakeBatchProcess)
+    images = {kind: Image.new("RGB", (40, 20), "white") for kind in FieldKind}
+    values = IsolatedOcrService().recognize_batch(images)
+
+    assert starts == 1
+    assert values[FieldKind.MATERIAL] == ("B.001", 0.98)
+    assert values[FieldKind.NAME] == ("泵体", 0.97)
+    assert values[FieldKind.PROCESS] == ("CP41.100A", 0.96)
 
 
 def test_native_child_crash_becomes_python_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]

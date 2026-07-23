@@ -22,6 +22,8 @@ class FieldKind(str, Enum):
 class DocumentStatus(str, Enum):
     PENDING = "待处理"
     NEEDS_BOXES = "待框选"
+    OCR_QUEUED = "等待识别"
+    OCR_RUNNING = "识别中"
     NEEDS_CONFIRMATION = "待确认"
     CONFIRMED = "已确认"
     RENAMED = "已重命名"
@@ -67,6 +69,8 @@ class DrawingDocument:
     proposed_filename: str = ""
     confirmed_filename: str = ""
     renamed_path: Path | None = None
+    ocr_revision: int = 0
+    ocr_progress: int = 0
 
     def __post_init__(self) -> None:
         if self.original_path is None:

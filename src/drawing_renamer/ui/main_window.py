@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -38,7 +39,7 @@ from PySide6.QtWidgets import (
 from ..diagnostics import DiagnosticsContext, app_data_directory
 from ..file_discovery import discover_pdfs, is_pdf_file
 from ..history_service import HistoryService
-from ..isolated_ocr import IsolatedOcrService
+from ..isolated_ocr import IsolatedOcrService, OcrCancelledError
 from ..models import DocumentStatus, DrawingDocument, FieldKind, NormalizedRect
 from ..naming import build_filename_from_fields, validate_destination
 from ..ocr_service import SuggestionResult
@@ -61,7 +62,16 @@ class PreviewRenderRequest:
     dpi: int
 
 
+@dataclass(slots=True)
+class OcrBatchJob:
+    document: DrawingDocument
+    revision: int
+    crops: dict[FieldKind, Image.Image]
+
+
 class MainWindow(QMainWindow):
+    MAX_CACHED_PAGES = 3
+
     def __init__(self, diagnostics: DiagnosticsContext | None = None) -> None:
         super().__init__()
         self.diagnostics = diagnostics
@@ -86,6 +96,14 @@ class MainWindow(QMainWindow):
         self._worker_timer.timeout.connect(self._poll_worker)
         self._worker_progress_queue: SimpleQueue[tuple[int, int, str]] = SimpleQueue()
         self._worker_progress_total = 0
+        self.ocr_queue_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ocr-queue")
+        self._ocr_jobs: deque[OcrBatchJob] = deque()
+        self._active_ocr_job: OcrBatchJob | None = None
+        self._ocr_queue_future: Future[dict[FieldKind, tuple[str, float | None]]] | None = None
+        self._ocr_queue_progress: SimpleQueue[tuple[OcrBatchJob, int, int, str]] = SimpleQueue()
+        self._ocr_queue_timer = QTimer(self)
+        self._ocr_queue_timer.setInterval(80)
+        self._ocr_queue_timer.timeout.connect(self._poll_ocr_queue)
         self.preview_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pdf-preview")
         self._preview_future: Future[tuple[PreviewRenderRequest, Image.Image]] | None = None
         self._pending_preview_request: PreviewRenderRequest | None = None
@@ -395,6 +413,31 @@ class MainWindow(QMainWindow):
             return self.documents[self.current_index]
         return None
 
+    @property
+    def _background_ocr_active(self) -> bool:
+        return bool(self._active_ocr_job or self._ocr_jobs or self._ocr_queue_future)
+
+    def _get_cached_base_image(self, path: Path) -> Image.Image | None:
+        image = self.base_images.pop(path, None)
+        if image is not None:
+            self.base_images[path] = image
+        return image
+
+    def _cache_base_image(self, path: Path, image: Image.Image) -> None:
+        self.base_images.pop(path, None)
+        self.base_images[path] = image
+        while len(self.base_images) > self.MAX_CACHED_PAGES:
+            oldest_path = next(iter(self.base_images))
+            self.base_images.pop(oldest_path, None)
+            logger.info("Evicted PDF preview cache: path=%s", oldest_path)
+
+    def _load_base_image(self, path: Path) -> Image.Image:
+        image = self._get_cached_base_image(path)
+        if image is None:
+            image = self.pdf.render_first_page(path)
+            self._cache_base_image(path, image)
+        return image
+
     def add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "添加 PDF", "", "PDF 文件 (*.pdf)")
         logger.info("Add files selected: count=%s", len(paths))
@@ -436,9 +479,16 @@ class MainWindow(QMainWindow):
         self.file_list.blockSignals(True)
         self.file_list.clear()
         for document in self.documents:
-            item = QListWidgetItem(f"{document.status.value}  ·  {document.path.name}")
+            status_text = document.status.value
+            if document.status == DocumentStatus.OCR_RUNNING:
+                status_text = f"识别中 {document.ocr_progress}/{len(FieldKind)}"
+            item = QListWidgetItem(f"{status_text}  ·  {document.path.name}")
             if document.status == DocumentStatus.CONFIRMED:
                 item.setForeground(QColor("#148356"))
+            elif document.status == DocumentStatus.OCR_QUEUED:
+                item.setForeground(QColor("#8a5a00"))
+            elif document.status == DocumentStatus.OCR_RUNNING:
+                item.setForeground(QColor("#1769aa"))
             elif document.status == DocumentStatus.ERROR:
                 item.setForeground(QColor("#bd2c2c"))
             self.file_list.addItem(item)
@@ -463,11 +513,8 @@ class MainWindow(QMainWindow):
             self.auto_suggest_action.isChecked(),
         )
         try:
-            base = self.base_images.get(document.path)
-            if base is None:
-                base = self.pdf.render_first_page(document.path)
-                self.base_images[document.path] = base
-                logger.info("PDF rendered: path=%s size=%sx%s", document.path, base.width, base.height)
+            base = self._load_base_image(document.path)
+            logger.info("PDF preview ready: path=%s size=%sx%s", document.path, base.width, base.height)
             image = self.pdf.rotate(base, document.rotation)
             self.preview.set_image(
                 image,
@@ -485,6 +532,7 @@ class MainWindow(QMainWindow):
                 document.status == DocumentStatus.PENDING
                 and self.auto_suggest_action.isChecked()
                 and not self._busy
+                and not self._background_ocr_active
             ):
                 QTimer.singleShot(100, self.suggest_current)
         except Exception as exc:
@@ -501,7 +549,12 @@ class MainWindow(QMainWindow):
             self.field_edits[kind].setText(field.text)
             self.field_confidence[kind].setText(self._confidence_text(field.confidence, field.manually_edited))
         self.filename_preview.setText(document.proposed_filename)
-        self.ocr_status.setText(document.error or document.status.value)
+        if document.status == DocumentStatus.OCR_RUNNING:
+            self.ocr_status.setText(f"正在后台识别 {document.ocr_progress}/{len(FieldKind)}")
+        elif document.status == DocumentStatus.OCR_QUEUED:
+            self.ocr_status.setText("已加入后台识别队列")
+        else:
+            self.ocr_status.setText(document.error or document.status.value)
         self._loading_fields = False
         self._update_recognize_all_button()
         self._update_action_buttons()
@@ -515,34 +568,43 @@ class MainWindow(QMainWindow):
     def _reset_ocr_progress(self) -> None:
         if self._busy:
             return
+        document = self.current_document
         self._worker_progress_total = 0
         self.ocr_progress.setRange(0, len(FieldKind))
-        self.ocr_progress.setValue(0)
-        self.ocr_progress.setFormat("等待识别 0/3")
+        if document and document.status == DocumentStatus.OCR_RUNNING:
+            self.ocr_progress.setValue(document.ocr_progress)
+            self.ocr_progress.setFormat(f"后台识别 {document.ocr_progress}/{len(FieldKind)}")
+        elif document and document.status == DocumentStatus.OCR_QUEUED:
+            self.ocr_progress.setValue(0)
+            self.ocr_progress.setFormat("等待后台识别 0/3")
+        else:
+            self.ocr_progress.setValue(0)
+            self.ocr_progress.setFormat("等待识别 0/3")
 
     def _update_recognize_all_button(self) -> None:
         document = self.current_document
+        recognition_available = not self._busy and not self._background_ocr_active
         for kind, button in self.recognize_buttons.items():
             has_box = bool(document and kind in document.boxes)
-            button.setEnabled(has_box and not self._busy)
+            button.setEnabled(has_box and recognition_available)
             if document is None:
                 tooltip = "请先添加并选择 PDF"
             elif not has_box:
                 tooltip = f"请先框选{kind.label}"
-            elif self._busy:
-                tooltip = "当前识别任务正在运行"
+            elif not recognition_available:
+                tooltip = "后台识别队列正在运行；可继续框选并使用蓝色主按钮提交下一份"
             else:
                 tooltip = f"只重新识别{kind.label}，保留另外两个字段"
             button.setToolTip(tooltip)
-        ready = bool(document and document.all_boxes_present and not self._busy)
+        ready = bool(document and document.all_boxes_present and recognition_available)
         self.recognize_all_button.setEnabled(ready)
         if document is None:
             tooltip = "请先添加并选择 PDF"
         elif not document.all_boxes_present:
             missing = [kind.label for kind in FieldKind if kind not in document.boxes]
             tooltip = "请先框选：" + "、".join(missing)
-        elif self._busy:
-            tooltip = "当前识别任务正在运行"
+        elif not recognition_available:
+            tooltip = "后台识别队列正在运行；可继续框选并使用蓝色主按钮提交下一份"
         else:
             tooltip = "依次识别物料编码、名称和工序编号"
         self.recognize_all_button.setToolTip(tooltip)
@@ -557,11 +619,31 @@ class MainWindow(QMainWindow):
             and document.proposed_filename != document.path.name
         )
         source_exists = bool(document and document.path.is_file())
-        self.confirm_button.setEnabled(has_document and not is_renamed and not self._busy)
+        queued = bool(
+            document
+            and document.status in (DocumentStatus.OCR_QUEUED, DocumentStatus.OCR_RUNNING)
+        )
+        ready_to_confirm = bool(document and document.all_fields_filled)
+        ready_to_queue = bool(document and document.all_boxes_present and not ready_to_confirm)
+        if queued:
+            self.confirm_button.setText("正在后台识别")
+        elif ready_to_queue:
+            self.confirm_button.setText("识别并下一份")
+        else:
+            self.confirm_button.setText("确认并下一份")
+        self.confirm_button.setEnabled(
+            has_document
+            and not is_renamed
+            and not queued
+            and not self._busy
+            and (ready_to_confirm or ready_to_queue)
+        )
         self.rename_single_button.setEnabled(
             has_document and proposed_changed and source_exists and not self._busy
         )
-        self.execute_button.setEnabled(bool(self.documents) and not self._busy)
+        self.execute_button.setEnabled(
+            bool(self.documents) and not self._busy and not self._background_ocr_active
+        )
         if not has_document:
             self.rename_single_button.setToolTip("请先选择一个PDF")
         elif not source_exists:
@@ -594,7 +676,13 @@ class MainWindow(QMainWindow):
         self.auto_suggest_action.setText(f"自动建议框：{'开' if enabled else '关'}")
         logger.info("Automatic company-anchor suggestions toggled: enabled=%s", enabled)
         document = self.current_document
-        if enabled and document and document.status == DocumentStatus.PENDING and not self._busy:
+        if (
+            enabled
+            and document
+            and document.status == DocumentStatus.PENDING
+            and not self._busy
+            and not self._background_ocr_active
+        ):
             QTimer.singleShot(100, self.suggest_current)
 
     def show_log_dialog(self) -> None:
@@ -648,9 +736,10 @@ class MainWindow(QMainWindow):
             "7. 拖动框体可以移动；拖动右下角可以调整大小。\n"
             "8. 如需重画，再次点击彩色标签并重新拖拽；也可选中框后按 Delete。\n"
             "9. 可点击每个字段下方的“仅识别此框”单独识别；三个框完成后也可点击“一键识别三个框”。\n"
-            "10. OCR失败时，可以直接在下方输入框手工填写。\n"
-            "11. 点击“确认并下一份”时，会自动保存现场画面和框选数据，可从左上角“历史记录”查看。\n"
-            "12. 批量重命名后请先检查新文件名再移动PDF。发现错误时，选中文件、重新框选和识别，"
+            "10. 三个框完成但尚未识别时，蓝色主按钮会显示“识别并下一份”；点击后任务进入后台队列，界面立即打开下一份PDF。\n"
+            "11. 左侧显示“等待识别、识别中、待确认”；后台完成后必须返回该文件人工核对，再点击“确认并下一份”。\n"
+            "12. OCR失败时，可以直接在下方输入框手工填写。确认时会保存现场画面和框选数据，可从左上角“历史记录”查看。\n"
+            "13. 批量重命名后请先检查新文件名再移动PDF。发现错误时，选中文件、重新框选和识别，"
             "然后点击“重命名选中文件”。\n\n"
             "快捷键：1=物料编码，2=名称，3=工序编号，Esc=退出框选。",
         )
@@ -674,10 +763,18 @@ class MainWindow(QMainWindow):
         document = self.current_document
         if not document:
             return
-        document.boxes = self.preview.normalized_boxes()
+        boxes = self.preview.normalized_boxes()
+        changed = boxes != document.boxes
+        if changed:
+            document.ocr_revision += 1
+        document.boxes = boxes
         if document.status not in (DocumentStatus.CONFIRMED, DocumentStatus.RENAMED):
-            document.status = DocumentStatus.NEEDS_CONFIRMATION if document.boxes else DocumentStatus.NEEDS_BOXES
+            if changed or document.status not in (DocumentStatus.OCR_QUEUED, DocumentStatus.OCR_RUNNING):
+                document.status = (
+                    DocumentStatus.NEEDS_CONFIRMATION if document.boxes else DocumentStatus.NEEDS_BOXES
+                )
         self._update_recognize_all_button()
+        self._update_action_buttons()
 
     def _box_finished(self, kind: FieldKind) -> None:
         self._save_current_boxes()
@@ -691,7 +788,7 @@ class MainWindow(QMainWindow):
         else:
             self.exit_box_selection()
         if self.current_document and self.current_document.all_boxes_present:
-            self.ocr_status.setText("三个框已添加，可点击“一键识别三个框”或直接手工输入")
+            self.ocr_status.setText("三个框已添加，可点击蓝色“识别并下一份”提交后台任务")
         else:
             self.ocr_status.setText(f"{kind.label}框已添加，请继续完成其余识别框")
 
@@ -706,7 +803,11 @@ class MainWindow(QMainWindow):
         field.manually_edited = True
         field.message = "手工输入"
         self.field_confidence[kind].setText("已手工修改")
-        if document.status not in (DocumentStatus.RENAMED,):
+        if document.status not in (
+            DocumentStatus.RENAMED,
+            DocumentStatus.OCR_QUEUED,
+            DocumentStatus.OCR_RUNNING,
+        ):
             document.status = DocumentStatus.NEEDS_CONFIRMATION
         self._update_filename(document)
 
@@ -751,8 +852,8 @@ class MainWindow(QMainWindow):
     def _set_busy(self, busy: bool, message: str = "") -> None:
         self._busy = busy
         self.busy_bar.setVisible(busy)
-        self.suggest_action.setEnabled(not busy)
-        self.cancel_ocr_action.setEnabled(busy)
+        self.suggest_action.setEnabled(not busy and not self._background_ocr_active)
+        self.cancel_ocr_action.setEnabled(busy or self._background_ocr_active)
         self._update_recognize_all_button()
         self._update_action_buttons()
         if message:
@@ -767,7 +868,7 @@ class MainWindow(QMainWindow):
         message: str,
         progress_total: int = 0,
     ) -> None:
-        if self._busy:
+        if self._busy or self._background_ocr_active:
             self.statusBar().showMessage("OCR正在处理中，请稍候")
             return
         self._worker_progress_queue = SimpleQueue()
@@ -940,11 +1041,14 @@ class MainWindow(QMainWindow):
             self._preview_timer.stop()
 
     def cancel_current_ocr(self) -> None:
-        if not self._busy:
+        if not self._busy and not self._background_ocr_active:
             return
         logger.info("User requested OCR cancellation")
         self.ocr.cancel_current()
-        self.ocr_status.setText("正在取消识别任务…")
+        if self._background_ocr_active:
+            self.ocr_status.setText("正在取消当前后台识别任务…")
+        else:
+            self.ocr_status.setText("正在取消识别任务…")
         self.statusBar().showMessage("正在终止OCR独立进程…")
 
     def _close_after_cancel_if_needed(self) -> None:
@@ -954,12 +1058,13 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self.close)
 
     def suggest_current(self) -> None:
+        if self._background_ocr_active:
+            self.statusBar().showMessage("后台识别队列运行中，请先继续框选；建议框功能稍后可用")
+            return
         document = self.current_document
         if not document:
             return
-        base = self.base_images.get(document.path)
-        if base is None:
-            return
+        base = self._load_base_image(document.path)
         path = document.path
         logger.info("Company-anchor suggestion requested for current PDF: %s", path)
         self._run_worker(
@@ -994,7 +1099,7 @@ class MainWindow(QMainWindow):
         self._update_filename(document)
         if document is self.current_document:
             self._invalidate_preview_render()
-            image = self.pdf.rotate(self.base_images[path], document.rotation)
+            image = self.pdf.rotate(self._load_base_image(path), document.rotation)
             self.preview.set_image(
                 image,
                 document.boxes,
@@ -1006,6 +1111,9 @@ class MainWindow(QMainWindow):
         self._refresh_list()
 
     def recognize_box(self, kind: FieldKind) -> None:
+        if self._background_ocr_active:
+            self.statusBar().showMessage("后台识别队列运行中，可使用蓝色主按钮提交下一份")
+            return
         document = self.current_document
         if not document:
             return
@@ -1016,7 +1124,7 @@ class MainWindow(QMainWindow):
             return
         path = document.path
         logger.info("Single-box OCR requested: path=%s field=%s", path, kind.value)
-        image = self.pdf.rotate(self.base_images[path], document.rotation)
+        image = self.pdf.rotate(self._load_base_image(path), document.rotation)
         crop = self.pdf.crop(image, rect)
         self._run_worker(
             lambda: (path, kind, *self.ocr.recognize_text(crop)),
@@ -1054,6 +1162,9 @@ class MainWindow(QMainWindow):
         self._refresh_list()
 
     def recognize_all_boxes(self) -> None:
+        if self._background_ocr_active:
+            self.statusBar().showMessage("后台识别队列运行中，可使用蓝色主按钮提交下一份")
+            return
         document = self.current_document
         if not document:
             return
@@ -1064,17 +1175,20 @@ class MainWindow(QMainWindow):
             return
         path = document.path
         logger.info("Current-page three-box OCR requested: path=%s", path)
-        image = self.pdf.rotate(self.base_images[path], document.rotation)
-        boxes = dict(document.boxes)
+        crops = self._capture_ocr_crops(document)
 
         def work() -> tuple[Path, dict[FieldKind, tuple[str, float | None]]]:
-            values: dict[FieldKind, tuple[str, float | None]] = {}
-            total = len(FieldKind)
-            for index, kind in enumerate(FieldKind, start=1):
-                self._report_worker_progress(index - 1, total, f"正在识别{kind.label}")
-                values[kind] = self.ocr.recognize_text(self.pdf.crop(image, boxes[kind]))
-                self._report_worker_progress(index, total, f"{kind.label}识别完成")
-            return path, values
+            def progress(value: int, total: int, field: str) -> None:
+                kind = FieldKind(field) if field else None
+                if value == 0 and kind is not None:
+                    message = f"正在识别{kind.label}"
+                elif kind is not None:
+                    message = f"{kind.label}识别完成"
+                else:
+                    message = "正在识别"
+                self._report_worker_progress(value, total, message)
+
+            return path, self.ocr.recognize_batch(crops, progress)
 
         self._run_worker(
             work,
@@ -1088,20 +1202,178 @@ class MainWindow(QMainWindow):
         document = next((item for item in self.documents if item.path == path), None)
         if document is None:
             return
-        failed: list[str] = []
-        for kind, (text, confidence) in values.items():
-            if text:
-                document.fields[kind].text = text
-                document.fields[kind].confidence = confidence
-                document.fields[kind].manually_edited = False
-            else:
-                failed.append(kind.label)
-        self._mark_document_for_review(document)
-        self._update_filename(document)
+        failed = self._apply_recognition_values(document, values)
         if document is self.current_document:
             self._load_fields(document)
             self.ocr_status.setText("请手工输入：" + "、".join(failed) if failed else "三个字段识别完成，请人工核对")
         self._refresh_list()
+
+    def _capture_ocr_crops(self, document: DrawingDocument) -> dict[FieldKind, Image.Image]:
+        base = self._load_base_image(document.path)
+        image = self.pdf.rotate(base, document.rotation)
+        boxes = dict(document.boxes)
+        return {kind: self.pdf.crop(image, boxes[kind]) for kind in FieldKind}
+
+    def _apply_recognition_values(
+        self,
+        document: DrawingDocument,
+        values: dict[FieldKind, tuple[str, float | None]],
+        *,
+        preserve_manual: bool = False,
+    ) -> list[str]:
+        failed: list[str] = []
+        for kind in FieldKind:
+            text, confidence = values.get(kind, ("", None))
+            if preserve_manual and document.fields[kind].manually_edited:
+                continue
+            if text:
+                document.fields[kind].text = text
+                document.fields[kind].confidence = confidence
+                document.fields[kind].manually_edited = False
+                document.fields[kind].message = ""
+            else:
+                failed.append(kind.label)
+                document.fields[kind].message = "无法识别，请手工输入"
+        self._mark_document_for_review(document)
+        document.error = ""
+        self._update_filename(document)
+        return failed
+
+    def _enqueue_background_ocr(self, document: DrawingDocument) -> bool:
+        if document.status in (DocumentStatus.OCR_QUEUED, DocumentStatus.OCR_RUNNING):
+            return False
+        try:
+            crops = self._capture_ocr_crops(document)
+        except Exception as exc:
+            logger.exception("Unable to prepare background OCR crops: path=%s", document.path)
+            QMessageBox.warning(self, "无法开始识别", f"无法读取框选区域：{exc}")
+            return False
+        job = OcrBatchJob(document=document, revision=document.ocr_revision, crops=crops)
+        document.status = DocumentStatus.OCR_QUEUED
+        document.ocr_progress = 0
+        document.error = ""
+        self._ocr_jobs.append(job)
+        logger.info(
+            "Background OCR queued: path=%s revision=%s waiting=%s",
+            document.path,
+            job.revision,
+            len(self._ocr_jobs),
+        )
+        self._refresh_list()
+        self._start_next_ocr_job()
+        return True
+
+    def _start_next_ocr_job(self) -> None:
+        if self._ocr_queue_future is not None:
+            return
+        while self._ocr_jobs:
+            job = self._ocr_jobs.popleft()
+            document = job.document
+            if job.revision != document.ocr_revision or document.status != DocumentStatus.OCR_QUEUED:
+                logger.info("Discarded stale queued OCR job: path=%s", document.path)
+                continue
+            self._active_ocr_job = job
+            document.status = DocumentStatus.OCR_RUNNING
+            document.ocr_progress = 0
+
+            def progress(value: int, total: int, field: str, active_job: OcrBatchJob = job) -> None:
+                self._ocr_queue_progress.put((active_job, value, total, field))
+
+            self._ocr_queue_future = self.ocr_queue_executor.submit(
+                self.ocr.recognize_batch,
+                job.crops,
+                progress,
+            )
+            self._ocr_queue_timer.start()
+            logger.info("Background OCR started: path=%s", document.path)
+            self._sync_ocr_controls()
+            self._refresh_list()
+            return
+        self._ocr_queue_timer.stop()
+        self._sync_ocr_controls()
+        self._close_after_cancel_if_needed()
+
+    def _sync_ocr_controls(self) -> None:
+        self.suggest_action.setEnabled(not self._busy and not self._background_ocr_active)
+        self.cancel_ocr_action.setEnabled(self._busy or self._background_ocr_active)
+        self._update_recognize_all_button()
+        self._update_action_buttons()
+
+    def _drain_ocr_queue_progress(self) -> None:
+        changed = False
+        while True:
+            try:
+                job, value, total, field = self._ocr_queue_progress.get_nowait()
+            except Empty:
+                break
+            if job is not self._active_ocr_job:
+                continue
+            document = job.document
+            document.ocr_progress = value
+            changed = True
+            try:
+                field_label = FieldKind(field).label if field else "字段"
+            except ValueError:
+                field_label = "字段"
+            if document is self.current_document:
+                self.ocr_progress.setRange(0, total)
+                self.ocr_progress.setValue(value)
+                self.ocr_progress.setFormat(f"后台识别 {value}/{total}")
+                self.ocr_status.setText(f"正在后台识别{field_label} {value}/{total}")
+            self.statusBar().showMessage(
+                f"后台识别：{document.path.name} {value}/{total}；等待 {len(self._ocr_jobs)} 份"
+            )
+        if changed:
+            self._refresh_list()
+
+    def _poll_ocr_queue(self) -> None:
+        self._drain_ocr_queue_progress()
+        future = self._ocr_queue_future
+        job = self._active_ocr_job
+        if future is None or job is None or not future.done():
+            return
+        self._ocr_queue_future = None
+        self._active_ocr_job = None
+        document = job.document
+        try:
+            values = future.result()
+        except OcrCancelledError:
+            logger.info("Background OCR cancelled: path=%s", document.path)
+            if job.revision == document.ocr_revision:
+                document.status = (
+                    DocumentStatus.NEEDS_CONFIRMATION if document.boxes else DocumentStatus.NEEDS_BOXES
+                )
+                document.error = "识别任务已取消，可重新提交或手工输入"
+                document.ocr_progress = 0
+        except Exception as exc:  # pragma: no cover - native/optional runtime boundary
+            logger.exception("Background OCR failed: path=%s", document.path)
+            if job.revision == document.ocr_revision:
+                document.status = DocumentStatus.ERROR
+                document.error = f"后台识别失败：{exc}"
+                document.ocr_progress = 0
+        else:
+            if job.revision != document.ocr_revision:
+                logger.info("Discarded stale background OCR result: path=%s", document.path)
+                newer_job_waiting = any(
+                    queued.document is document and queued.revision == document.ocr_revision
+                    for queued in self._ocr_jobs
+                )
+                if not newer_job_waiting:
+                    document.error = "框选已发生变化，旧的识别结果已丢弃，请重新识别"
+            else:
+                failed = self._apply_recognition_values(document, values, preserve_manual=True)
+                document.ocr_progress = len(FieldKind)
+                document.error = "请手工输入：" + "、".join(failed) if failed else ""
+                logger.info(
+                    "Background OCR completed: path=%s failed=%s",
+                    document.path,
+                    failed,
+                )
+        if document is self.current_document:
+            self._load_fields(document)
+        self._refresh_list()
+        self._sync_ocr_controls()
+        QTimer.singleShot(0, self._start_next_ocr_job)
 
     def rotate_current(self, degrees_ccw: int) -> None:
         document = self.current_document
@@ -1117,7 +1389,10 @@ class MainWindow(QMainWindow):
         document.boxes = transformed
         document.rotation = (document.rotation + degrees_ccw) % 360
         self._invalidate_preview_render()
-        image = self.pdf.rotate(self.base_images[document.path], document.rotation)
+        document.ocr_revision += 1
+        if document.status not in (DocumentStatus.CONFIRMED, DocumentStatus.RENAMED):
+            document.status = DocumentStatus.NEEDS_CONFIRMATION
+        image = self.pdf.rotate(self._load_base_image(document.path), document.rotation)
         self.preview.set_image(
             image,
             document.boxes,
@@ -1141,7 +1416,14 @@ class MainWindow(QMainWindow):
             document.fields[kind].text = self.field_edits[kind].text().strip()
         self._update_filename(document)
         if not document.proposed_filename:
-            QMessageBox.warning(self, "信息不完整", "物料编码、名称和工序编号均不能为空。")
+            if document.all_boxes_present and self._enqueue_background_ocr(document):
+                self._advance_to_next_work_item()
+                return
+            QMessageBox.warning(
+                self,
+                "信息不完整",
+                "请先完成三个识别框，或手工填写物料编码、名称和工序编号。",
+            )
             return
         reserved = {
             item.path.with_name(item.confirmed_filename)
@@ -1162,17 +1444,31 @@ class MainWindow(QMainWindow):
         )
         self._save_history_snapshot(document, "确认并等待批量重命名")
         self._refresh_list()
-        next_row = next(
-            (index for index, item in enumerate(self.documents) if item.status not in (DocumentStatus.CONFIRMED, DocumentStatus.RENAMED)),
-            -1,
-        )
-        if next_row >= 0:
-            self.file_list.setCurrentRow(next_row)
-        else:
+        if not self._advance_to_next_work_item():
             self.ocr_status.setText("全部文件已确认，可以执行批量重命名")
             QMessageBox.information(self, "确认完成", "全部文件已人工确认。请检查列表后执行批量重命名。")
 
+    def _advance_to_next_work_item(self) -> bool:
+        if not self.documents:
+            return False
+        current = self.current_index
+        order = list(range(current + 1, len(self.documents))) + list(range(0, current))
+        preferred_statuses = (DocumentStatus.PENDING, DocumentStatus.NEEDS_BOXES)
+        review_statuses = (DocumentStatus.NEEDS_CONFIRMATION, DocumentStatus.ERROR)
+        for statuses in (preferred_statuses, review_statuses):
+            next_row = next((index for index in order if self.documents[index].status in statuses), -1)
+            if next_row >= 0:
+                self.file_list.setCurrentRow(next_row)
+                return True
+        if self._background_ocr_active:
+            self.ocr_status.setText("已提交后台识别；可在左侧查看进度，完成后请逐份人工确认")
+            self.statusBar().showMessage("所有已框选文件均已提交后台识别，请等待完成后人工确认")
+        return False
+
     def rename_selected_file(self) -> None:
+        if self._background_ocr_active:
+            QMessageBox.information(self, "后台识别进行中", "请等待识别队列完成后再重命名文件。")
+            return
         document = self.current_document
         if document is None:
             QMessageBox.information(self, "单文件重命名", "请先在左侧选择一个PDF。")
@@ -1227,7 +1523,7 @@ class MainWindow(QMainWindow):
             return
         cached = self.base_images.pop(old_path, None)
         if cached is not None:
-            self.base_images[document.path] = cached
+            self._cache_base_image(document.path, cached)
         document.proposed_filename = document.path.name
         logger.info("Single-file correction completed: source=%s destination=%s", old_path, document.path)
         self._refresh_list()
@@ -1241,6 +1537,9 @@ class MainWindow(QMainWindow):
 
     def execute_rename(self) -> None:
         if not self.documents:
+            return
+        if self._background_ocr_active:
+            QMessageBox.information(self, "后台识别进行中", "请等待识别队列完成并逐份人工确认后再批量重命名。")
             return
         errors = self.renamer.validate_batch(self.documents)
         if errors:
@@ -1268,7 +1567,7 @@ class MainWindow(QMainWindow):
             if document.path != old_path:
                 cached = self.base_images.pop(old_path, None)
                 if cached is not None:
-                    self.base_images[document.path] = cached
+                    self._cache_base_image(document.path, cached)
         success = sum(result.success for result in results)
         logger.info("Batch rename finished: success=%s total=%s", success, len(results))
         self._refresh_list()
@@ -1283,23 +1582,31 @@ class MainWindow(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        logger.info("Window close requested; busy=%s documents=%s", self._busy, len(self.documents))
-        if self._busy:
+        logger.info(
+            "Window close requested; busy=%s background_ocr=%s documents=%s",
+            self._busy,
+            self._background_ocr_active,
+            len(self.documents),
+        )
+        if self._busy or self._background_ocr_active:
             answer = QMessageBox.question(
                 self,
                 "识别任务正在运行",
-                "当前OCR任务尚未结束。是否取消识别并关闭软件？",
+                "当前OCR任务或等待队列尚未结束。是否取消全部识别任务并关闭软件？",
             )
             if answer == QMessageBox.StandardButton.Yes:
                 self._pending_close = True
+                self._ocr_jobs.clear()
                 self.cancel_current_ocr()
             event.ignore()
             return
         self._worker_timer.stop()
+        self._ocr_queue_timer.stop()
         self._preview_timer.stop()
         self._pending_preview_request = None
         self._preview_request_serial += 1
         self.executor.shutdown(wait=False, cancel_futures=True)
+        self.ocr_queue_executor.shutdown(wait=False, cancel_futures=True)
         self.preview_executor.shutdown(wait=False, cancel_futures=True)
         self.history_executor.shutdown(wait=True, cancel_futures=False)
         event.accept()
