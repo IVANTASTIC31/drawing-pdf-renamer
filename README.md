@@ -83,3 +83,15 @@ $env:PYTHONPATH = "src"
 $env:PYTHONPATH = "src"
 .\.venv\Scripts\python.exe -m pytest
 ```
+
+## 构建 Windows 发行版
+
+发行脚本会同时生成联网安装版和包含 Python、依赖及 OCR 模型的免安装便携版：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install pyinstaller
+powershell -ExecutionPolicy Bypass -File .\release\build_release.ps1 -Version 0.1.0
+```
+
+构建结果位于 `dist\release`。脚本仅按白名单复制运行文件，不会打包 `.venv`、Git 数据、
+测试、PDF、截图、日志或历史记录，并会为 ZIP 生成 SHA-256 校验文件。

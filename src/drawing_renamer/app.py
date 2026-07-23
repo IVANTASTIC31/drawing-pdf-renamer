@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -11,8 +12,20 @@ from .diagnostics import mark_clean_exit, setup_diagnostics
 from .ui.main_window import MainWindow
 
 
-def main() -> int:
+def configure_runtime_environment() -> None:
+    """Configure Paddle model lookup for both source and frozen builds."""
+
     os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
+    if not getattr(sys, "frozen", False):
+        return
+    bundle_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    bundled_cache = bundle_root / "paddlex_cache"
+    if bundled_cache.is_dir():
+        os.environ["PADDLE_PDX_CACHE_HOME"] = str(bundled_cache)
+
+
+def main() -> int:
+    configure_runtime_environment()
     diagnostics = setup_diagnostics()
     logger = logging.getLogger("drawing_renamer.app")
     QApplication.setHighDpiScaleFactorRoundingPolicy(

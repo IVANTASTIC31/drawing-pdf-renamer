@@ -136,3 +136,36 @@ def test_running_worker_can_be_cancelled(monkeypatch) -> None:  # type: ignore[n
         assert service.cancel_current()
         with pytest.raises(OcrCancelledError):
             future.result(timeout=2)
+
+
+def test_frozen_application_relaunches_itself_as_ocr_worker(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    captured: list[str] = []
+
+    class FakeFrozenProcess:
+        pid = 987
+        returncode = 0
+
+        def __init__(self, command, **_kwargs):  # type: ignore[no-untyped-def]
+            captured.extend(command)
+            Path(command[4]).write_text(
+                json.dumps({"ok": True, "result": {"text": "CP41.100A", "confidence": 0.99}}),
+                encoding="utf-8",
+            )
+
+        def communicate(self, timeout=None):  # type: ignore[no-untyped-def]
+            return "", ""
+
+        def poll(self):  # type: ignore[no-untyped-def]
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+    monkeypatch.setattr("drawing_renamer.isolated_ocr.sys.frozen", True, raising=False)
+    monkeypatch.setattr("drawing_renamer.isolated_ocr.subprocess.Popen", FakeFrozenProcess)
+
+    text, confidence = IsolatedOcrService().recognize_text(Image.new("RGB", (20, 20), "white"))
+
+    assert captured[1:3] == ["--ocr-worker", "recognize"]
+    assert text == "CP41.100A"
+    assert confidence == 0.99

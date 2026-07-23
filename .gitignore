@@ -7,4 +7,5 @@ logs/
 安装日志/
 dist/
 build/
-*.spec
+/*.spec
+build-release.*

@@ -131,16 +131,22 @@ class IsolatedOcrService:
                 if console_python.exists():
                     executable = console_python
 
-            command = [
-                str(executable),
-                "-m",
-                "drawing_renamer.ocr_worker",
+            worker_arguments = [
                 mode,
                 str(input_path),
                 str(output_path),
                 str(crash_path),
                 str(progress_path),
             ]
+            if getattr(sys, "frozen", False):
+                command = [str(executable), "--ocr-worker", *worker_arguments]
+            else:
+                command = [
+                    str(executable),
+                    "-m",
+                    "drawing_renamer.ocr_worker",
+                    *worker_arguments,
+                ]
             environment = os.environ.copy()
             environment["PYTHONUTF8"] = "1"
             environment["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"

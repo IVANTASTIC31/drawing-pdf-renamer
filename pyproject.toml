@@ -4,16 +4,17 @@ version = "0.1.0"
 description = "Semi-automatic engineering drawing PDF renamer"
 requires-python = ">=3.11"
 dependencies = [
-    "PySide6>=6.8",
-    "PyMuPDF>=1.25",
-    "Pillow>=11",
-    "numpy>=2",
-    "paddleocr>=3.0",
-    "paddlepaddle>=3.3",
+    "PySide6==6.11.1",
+    "PyMuPDF==1.28.0",
+    "Pillow==12.3.0",
+    "numpy==2.3.5",
+    "paddleocr==3.7.0",
+    "paddlepaddle==3.3.1",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+release = ["pyinstaller==6.16.0"]
 
 [project.scripts]
 drawing-renamer = "drawing_renamer.app:main"
