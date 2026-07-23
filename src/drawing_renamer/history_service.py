@@ -106,6 +106,24 @@ class HistoryService:
         return sorted(entries, key=lambda entry: entry.timestamp, reverse=True)
 
     @staticmethod
+    def filter_entries(entries: list[HistoryEntry], pattern: str) -> list[HistoryEntry]:
+        """Return entries whose material, name, or process text matches a regex."""
+
+        query = pattern.strip()
+        if not query:
+            return list(entries)
+        expression = re.compile(query, re.IGNORECASE)
+        matched: list[HistoryEntry] = []
+        for entry in entries:
+            values = (
+                str(entry.fields.get(kind.value, {}).get("text") or "")
+                for kind in FieldKind
+            )
+            if any(expression.search(value) for value in values):
+                matched.append(entry)
+        return matched
+
+    @staticmethod
     def _entry_from_payload(payload: dict[str, Any], json_path: Path) -> HistoryEntry:
         return HistoryEntry(
             record_id=str(payload["record_id"]),
