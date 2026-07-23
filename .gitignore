@@ -4,6 +4,7 @@ __pycache__/
 *.py[cod]
 ui_preview.png
 logs/
+安装日志/
 dist/
 build/
 *.spec
