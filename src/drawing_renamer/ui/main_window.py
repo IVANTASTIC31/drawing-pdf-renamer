@@ -10,7 +10,7 @@ from queue import Empty, SimpleQueue
 from typing import Any
 
 from PIL import Image
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QEvent, QTimer, Qt
 from PySide6.QtGui import QAction, QColor, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -120,8 +120,12 @@ class MainWindow(QMainWindow):
         self.kind_buttons: dict[FieldKind, QToolButton] = {}
         self.recognize_buttons: dict[FieldKind, QPushButton] = {}
         self.field_cards: dict[FieldKind, QFrame] = {}
+        self._shortcuts: list[QShortcut] = []
         self._build_ui()
         self._bind_shortcuts()
+        application = QApplication.instance()
+        if application is not None:
+            application.installEventFilter(self)
         self._apply_style()
         self._update_action_buttons()
 
@@ -347,12 +351,58 @@ class MainWindow(QMainWindow):
 
     def _bind_shortcuts(self) -> None:
         for key, kind in zip(("1", "2", "3"), FieldKind):
-            shortcut = QShortcut(QKeySequence(key), self)
-            shortcut.activated.connect(lambda value=kind: self._select_kind_button(value))
-        QShortcut(QKeySequence("Ctrl+Return"), self).activated.connect(self.confirm_and_next)
-        QShortcut(QKeySequence("R"), self).activated.connect(lambda: self.rotate_current(-90))
-        QShortcut(QKeySequence("Delete"), self).activated.connect(self._delete_selected_box)
-        QShortcut(QKeySequence("Escape"), self).activated.connect(self.exit_box_selection)
+            self._add_shortcut(key, lambda value=kind: self._activate_kind_shortcut(value))
+        self._add_shortcut("Ctrl+Return", self.confirm_and_next)
+        self._add_shortcut("A", lambda: self._activate_rotate_shortcut(90))
+        self._add_shortcut("B", lambda: self._activate_rotate_shortcut(-90))
+        self._add_shortcut("R", lambda: self._activate_rotate_shortcut(-90))
+        self._add_shortcut("Space", self._activate_primary_shortcut)
+        self._add_shortcut("Delete", self._delete_selected_box)
+        self._add_shortcut("Escape", self.exit_box_selection)
+
+    def _add_shortcut(self, key: str, callback: Callable[[], None]) -> None:
+        shortcut = QShortcut(QKeySequence(key), self)
+        shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        shortcut.activated.connect(callback)
+        self._shortcuts.append(shortcut)
+
+    def _editable_field_has_focus(self) -> bool:
+        focused = QApplication.focusWidget()
+        return (
+            isinstance(focused, QLineEdit)
+            and not focused.isReadOnly()
+            and (focused is self or self.isAncestorOf(focused))
+        )
+
+    def _activate_kind_shortcut(self, kind: FieldKind) -> None:
+        if not self._editable_field_has_focus():
+            self._select_kind_button(kind)
+
+    def _activate_rotate_shortcut(self, degrees_ccw: int) -> None:
+        if not self._editable_field_has_focus():
+            self.rotate_current(degrees_ccw)
+
+    def _activate_primary_shortcut(self) -> None:
+        if not self._editable_field_has_focus() and self.confirm_button.isEnabled():
+            self.confirm_button.click()
+
+    def eventFilter(self, watched: Any, event: Any) -> bool:  # noqa: N802
+        """Release an editor when the user clicks elsewhere in this window."""
+
+        if event.type() == QEvent.Type.MouseButtonPress:
+            focused = QApplication.focusWidget()
+            target = watched if isinstance(watched, QWidget) else None
+            if (
+                isinstance(focused, QLineEdit)
+                and not focused.isReadOnly()
+                and self.isAncestorOf(focused)
+                and target is not None
+                and (target is self or self.isAncestorOf(target))
+                and target is not focused
+                and not focused.isAncestorOf(target)
+            ):
+                focused.clearFocus()
+        return super().eventFilter(watched, event)
 
     def _apply_style(self) -> None:
         self.setStyleSheet(
@@ -741,7 +791,9 @@ class MainWindow(QMainWindow):
             "12. OCR失败时，可以直接在下方输入框手工填写。确认时会保存现场画面和框选数据，可从左上角“历史记录”查看。\n"
             "13. 批量重命名后请先检查新文件名再移动PDF。发现错误时，选中文件、重新框选和识别，"
             "然后点击“重命名选中文件”。\n\n"
-            "快捷键：1=物料编码，2=名称，3=工序编号，Esc=退出框选。",
+            "快捷键：1=物料编码，2=名称，3=工序编号，A=左转90°，B=右转90°，"
+            "空格=执行蓝色主按钮，Esc=退出框选。\n"
+            "输入框正在编辑时，单键快捷键不会触发；点击窗口其他区域即可退出输入状态。",
         )
 
     def _select_kind_button(self, kind: FieldKind) -> None:
@@ -1609,4 +1661,7 @@ class MainWindow(QMainWindow):
         self.ocr_queue_executor.shutdown(wait=False, cancel_futures=True)
         self.preview_executor.shutdown(wait=False, cancel_futures=True)
         self.history_executor.shutdown(wait=True, cancel_futures=False)
+        application = QApplication.instance()
+        if application is not None:
+            application.removeEventFilter(self)
         event.accept()

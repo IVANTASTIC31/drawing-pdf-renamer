@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 
 from PIL import Image
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QEvent, QRectF, Qt
 from PySide6.QtWidgets import QApplication, QGraphicsItem, QMessageBox, QPushButton
 
 from drawing_renamer.history_service import HistoryService
@@ -48,6 +48,45 @@ def test_background_result_is_polled_on_the_gui_thread() -> None:
 
     assert received == ["ok"]
     assert not window._busy
+    window.close()
+
+
+def test_rotation_and_primary_action_shortcuts_respect_text_editing() -> None:
+    app = _application()
+    window = MainWindow()
+    window.show()
+    app.processEvents()
+
+    shortcuts = {shortcut.key().toString(): shortcut for shortcut in window._shortcuts}
+    assert {"A", "B", "Space"}.issubset(shortcuts)
+
+    rotations: list[int] = []
+    window.rotate_current = rotations.append  # type: ignore[method-assign]
+    shortcuts["A"].activated.emit()
+    shortcuts["B"].activated.emit()
+    assert rotations == [90, -90]
+
+    primary_clicks: list[bool] = []
+    window.confirm_button.clicked.disconnect()
+    window.confirm_button.clicked.connect(lambda: primary_clicks.append(True))
+    window.confirm_button.setEnabled(True)
+    shortcuts["Space"].activated.emit()
+    assert primary_clicks == [True]
+
+    editor = window.field_edits[FieldKind.NAME]
+    editor.setFocus()
+    app.processEvents()
+    assert editor.hasFocus()
+
+    shortcuts["A"].activated.emit()
+    shortcuts["Space"].activated.emit()
+    assert rotations == [90, -90]
+    assert primary_clicks == [True]
+
+    window.eventFilter(window.instruction, QEvent(QEvent.Type.MouseButtonPress))
+    assert not editor.hasFocus()
+    shortcuts["Space"].activated.emit()
+    assert primary_clicks == [True, True]
     window.close()
 
 
