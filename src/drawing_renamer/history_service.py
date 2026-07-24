@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -104,6 +105,21 @@ class HistoryService:
             except (OSError, ValueError, KeyError, TypeError):
                 continue
         return sorted(entries, key=lambda entry: entry.timestamp, reverse=True)
+
+    def clear_all(self) -> int:
+        """Delete every stored history record and recreate an empty root."""
+
+        record_count = len(self.list_entries())
+        if not self.root.exists():
+            return record_count
+        if self.root.is_symlink():
+            raise OSError(f"历史记录目录不能是符号链接：{self.root}")
+        resolved = self.root.resolve()
+        if resolved == Path(resolved.anchor):
+            raise OSError(f"拒绝清除磁盘根目录：{resolved}")
+        shutil.rmtree(resolved)
+        resolved.mkdir(parents=True, exist_ok=True)
+        return record_count
 
     @staticmethod
     def filter_entries(entries: list[HistoryEntry], pattern: str) -> list[HistoryEntry]:

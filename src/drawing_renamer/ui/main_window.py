@@ -354,7 +354,7 @@ class MainWindow(QMainWindow):
             self._add_shortcut(key, lambda value=kind: self._activate_kind_shortcut(value))
         self._add_shortcut("Ctrl+Return", self.confirm_and_next)
         self._add_shortcut("A", lambda: self._activate_rotate_shortcut(90))
-        self._add_shortcut("B", lambda: self._activate_rotate_shortcut(-90))
+        self._add_shortcut("D", lambda: self._activate_rotate_shortcut(-90))
         self._add_shortcut("R", lambda: self._activate_rotate_shortcut(-90))
         self._add_shortcut("Space", self._activate_primary_shortcut)
         self._add_shortcut("Delete", self._delete_selected_box)
@@ -571,6 +571,7 @@ class MainWindow(QMainWindow):
                 document.boxes,
                 preview_dpi=self.pdf.PREVIEW_DPI,
                 max_detail_dpi=self.pdf.MAX_DETAIL_DPI,
+                preserve_view=True,
             )
             self._load_fields(document)
             if document.path.is_file():
@@ -783,7 +784,8 @@ class MainWindow(QMainWindow):
             "4. 松开鼠标后生成带标签的高亮框。\n"
             "5. 完成一个框后会自动进入下一个框选标签。\n"
             "6. 随时按 Esc 退出框选模式，之后可按住鼠标左键拖动图纸。\n"
-            "7. 拖动框体可以移动；拖动右下角可以调整大小。\n"
+            "7. 拖动框体可以移动；拖动右下角可以调整大小。切换PDF时会保留当前缩放和视野位置，"
+            "需要返回全图时点击“适合窗口”。\n"
             "8. 如需重画，再次点击彩色标签并重新拖拽；也可选中框后按 Delete。\n"
             "9. 可点击每个字段下方的“仅识别此框”单独识别；三个框完成后也可点击“一键识别三个框”。\n"
             "10. 三个框完成但尚未识别时，蓝色主按钮会显示“识别并下一份”；点击后任务进入后台队列，界面立即打开下一份PDF。\n"
@@ -791,7 +793,7 @@ class MainWindow(QMainWindow):
             "12. OCR失败时，可以直接在下方输入框手工填写。确认时会保存现场画面和框选数据，可从左上角“历史记录”查看。\n"
             "13. 批量重命名后请先检查新文件名再移动PDF。发现错误时，选中文件、重新框选和识别，"
             "然后点击“重命名选中文件”。\n\n"
-            "快捷键：1=物料编码，2=名称，3=工序编号，A=左转90°，B=右转90°，"
+            "快捷键：1=物料编码，2=名称，3=工序编号，A=左转90°，D=右转90°，"
             "空格=执行蓝色主按钮，Esc=退出框选。\n"
             "输入框正在编辑时，单键快捷键不会触发；点击窗口其他区域即可退出输入状态。",
         )

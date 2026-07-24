@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 from PySide6.QtCore import QPointF, QRectF, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPen, QPixmap, QTransform, QWheelEvent
@@ -23,6 +24,15 @@ COLORS = {
     FieldKind.PROCESS: QColor("#f08a24"),
 }
 BOX_PEN_WIDTH = 1.0
+
+
+@dataclass(frozen=True, slots=True)
+class PreviewViewState:
+    """Zoom and viewport center expressed relative to the current page."""
+
+    zoom_ratio: float
+    center_x: float
+    center_y: float
 
 
 def box_pen(color: QColor) -> QPen:
@@ -176,6 +186,7 @@ class DocumentGraphicsView(QGraphicsView):
         self.roi_items: dict[FieldKind, RoiItem] = {}
         self.preview_dpi = 180
         self.max_detail_dpi = 300
+        self._fit_scale = 1.0
         self.active_kind: FieldKind | None = None
         self._drawing = False
         self._start = QPointF()
@@ -198,7 +209,9 @@ class DocumentGraphicsView(QGraphicsView):
         boxes: dict[FieldKind, NormalizedRect] | None = None,
         preview_dpi: int = 180,
         max_detail_dpi: int = 300,
+        preserve_view: bool = False,
     ) -> None:
+        previous_view = self.view_state() if preserve_view else None
         self._detail_timer.stop()
         self.scene().clear()
         self.high_res_item = None
@@ -214,6 +227,8 @@ class DocumentGraphicsView(QGraphicsView):
         for kind, rect in (boxes or {}).items():
             self.add_box(kind, rect)
         self.fit_to_window()
+        if previous_view is not None:
+            self.restore_view_state(previous_view)
 
     def set_high_resolution_region(self, image: Image.Image, normalized: NormalizedRect) -> None:
         """Overlay a crisp visible-region render without changing scene coordinates."""
@@ -318,7 +333,48 @@ class DocumentGraphicsView(QGraphicsView):
     def fit_to_window(self) -> None:
         if self.pixmap_item:
             self.fitInView(self.image_rect, Qt.AspectRatioMode.KeepAspectRatio)
+            self._fit_scale = max(
+                abs(self.transform().m11()),
+                abs(self.transform().m22()),
+                1e-9,
+            )
             self._schedule_visible_detail()
+
+    def view_state(self) -> PreviewViewState | None:
+        bounds = self.image_rect
+        if bounds.isEmpty():
+            return None
+        center = self.mapToScene(self.viewport().rect().center())
+        current_scale = max(
+            abs(self.transform().m11()),
+            abs(self.transform().m22()),
+            1e-9,
+        )
+        center_x = (center.x() - bounds.left()) / bounds.width()
+        center_y = (center.y() - bounds.top()) / bounds.height()
+        return PreviewViewState(
+            zoom_ratio=current_scale / max(self._fit_scale, 1e-9),
+            center_x=min(max(center_x, 0.0), 1.0),
+            center_y=min(max(center_y, 0.0), 1.0),
+        )
+
+    def restore_view_state(self, state: PreviewViewState) -> None:
+        bounds = self.image_rect
+        if bounds.isEmpty():
+            return
+        current_scale = max(
+            abs(self.transform().m11()),
+            abs(self.transform().m22()),
+            1e-9,
+        )
+        desired_scale = max(self._fit_scale * state.zoom_ratio, 1e-9)
+        factor = desired_scale / current_scale
+        self.scale(factor, factor)
+        self.centerOn(
+            bounds.left() + min(max(state.center_x, 0.0), 1.0) * bounds.width(),
+            bounds.top() + min(max(state.center_y, 0.0), 1.0) * bounds.height(),
+        )
+        self._schedule_visible_detail()
 
     def zoom_in(self) -> None:
         self.scale(1.2, 1.2)

@@ -70,3 +70,21 @@ def test_history_regex_search_matches_any_of_three_fields() -> None:
 def test_history_regex_search_rejects_invalid_expression() -> None:
     with pytest.raises(re.error):
         HistoryService.filter_entries([], "[")
+
+
+def test_clear_all_removes_records_and_screenshots_but_keeps_empty_root(tmp_path) -> None:
+    source = tmp_path / "KM_001.pdf"
+    document = DrawingDocument(source)
+    document.proposed_filename = "B.001_泵体_CP41.100A.pdf"
+    service = HistoryService(tmp_path / "history")
+    image = QImage(320, 180, QImage.Format.Format_RGB32)
+    image.fill(QColor("white"))
+    service.save(service.create_payload(document, "确认"), image)
+    (service.root / "other.tmp").write_text("temporary", encoding="utf-8")
+
+    deleted_count = service.clear_all()
+
+    assert deleted_count == 1
+    assert service.root.is_dir()
+    assert list(service.root.iterdir()) == []
+    assert service.list_entries() == []

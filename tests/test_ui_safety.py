@@ -58,12 +58,13 @@ def test_rotation_and_primary_action_shortcuts_respect_text_editing() -> None:
     app.processEvents()
 
     shortcuts = {shortcut.key().toString(): shortcut for shortcut in window._shortcuts}
-    assert {"A", "B", "Space"}.issubset(shortcuts)
+    assert {"A", "D", "Space"}.issubset(shortcuts)
+    assert "B" not in shortcuts
 
     rotations: list[int] = []
     window.rotate_current = rotations.append  # type: ignore[method-assign]
     shortcuts["A"].activated.emit()
-    shortcuts["B"].activated.emit()
+    shortcuts["D"].activated.emit()
     assert rotations == [90, -90]
 
     primary_clicks: list[bool] = []
@@ -108,6 +109,43 @@ def test_zoom_requests_a_capped_visible_high_resolution_region() -> None:
     assert 0 < rect.width < 1
     assert 0 < rect.height < 1
     view.close()
+
+
+def test_switching_documents_preserves_zoom_and_relative_view_center() -> None:
+    app = _application()
+    window = MainWindow()
+    window.resize(1200, 800)
+    window.show()
+    first_path = Path("view-state-first.pdf")
+    second_path = Path("view-state-second.pdf")
+    window.documents = [DrawingDocument(first_path), DrawingDocument(second_path)]
+    window._cache_base_image(first_path, Image.new("RGB", (1200, 900), "white"))
+    window._cache_base_image(second_path, Image.new("RGB", (1600, 1200), "white"))
+
+    window.select_document(0)
+    app.processEvents()
+    window.preview.zoom_in()
+    window.preview.zoom_in()
+    first_bounds = window.preview.image_rect
+    window.preview.centerOn(first_bounds.width() * 0.78, first_bounds.height() * 0.74)
+    app.processEvents()
+    before = window.preview.view_state()
+
+    window.select_document(1)
+    app.processEvents()
+    after = window.preview.view_state()
+
+    assert before is not None
+    assert after is not None
+    assert abs(after.zoom_ratio - before.zoom_ratio) < 0.01
+    assert abs(after.center_x - before.center_x) < 0.03
+    assert abs(after.center_y - before.center_y) < 0.03
+
+    window.preview.fit_to_window()
+    reset = window.preview.view_state()
+    assert reset is not None
+    assert abs(reset.zoom_ratio - 1.0) < 0.01
+    window.close()
 
 
 def test_high_resolution_render_result_is_applied_without_blocking_gui(tmp_path: Path) -> None:
