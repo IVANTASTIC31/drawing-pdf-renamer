@@ -10,6 +10,7 @@ from pathlib import Path
 from PIL import Image
 
 from .ocr_service import AnchorSuggestionService, PaddleOcrService, PaddleTextRecognitionService
+from .subprocess_visibility import install_hidden_subprocess_policy
 
 
 def _suggestion_payload(result) -> dict[str, object]:  # type: ignore[no-untyped-def]
@@ -36,6 +37,9 @@ def _write_progress(progress_path: Path | None, value: int, total: int, field: s
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Paddle and PaddleX may launch hardware/compiler probes of their own.
+    # Apply the no-window policy before either OCR model is initialized.
+    install_hidden_subprocess_policy()
     arguments = list(sys.argv[1:] if argv is None else argv)
     if len(arguments) not in (4, 5):
         return 2

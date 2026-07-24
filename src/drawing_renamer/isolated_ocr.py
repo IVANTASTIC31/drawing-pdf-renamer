@@ -15,6 +15,7 @@ from PIL import Image
 
 from .models import FieldKind, NormalizedRect
 from .ocr_service import OcrUnavailableError, SuggestionResult
+from .subprocess_visibility import hidden_window_options
 
 
 logger = logging.getLogger("drawing_renamer.ocr_process")
@@ -150,7 +151,7 @@ class IsolatedOcrService:
             environment = os.environ.copy()
             environment["PYTHONUTF8"] = "1"
             environment["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
-            creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            window_options = hidden_window_options()
             logger.info("Starting isolated OCR worker: mode=%s %s", mode, input_description)
             started_at = time.perf_counter()
             if mode == "suggest":
@@ -169,7 +170,7 @@ class IsolatedOcrService:
                     encoding="utf-8",
                     errors="replace",
                     env=environment,
-                    creationflags=creation_flags,
+                    **window_options,
                 )
                 with self._lock:
                     self._active_process = process

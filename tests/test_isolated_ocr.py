@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -8,6 +10,10 @@ from PIL import Image
 from drawing_renamer.isolated_ocr import IsolatedOcrService, OcrCancelledError
 from drawing_renamer.models import FieldKind
 from drawing_renamer.ocr_service import OcrUnavailableError
+from drawing_renamer.subprocess_visibility import (
+    hidden_window_options,
+    install_hidden_subprocess_policy,
+)
 
 
 def test_recognize_text_reads_child_process_result(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -169,3 +175,32 @@ def test_frozen_application_relaunches_itself_as_ocr_worker(monkeypatch) -> None
     assert captured[1:3] == ["--ocr-worker", "recognize"]
     assert text == "CP41.100A"
     assert confidence == 0.99
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only process flags")
+def test_windows_hidden_options_use_creation_flag_and_startup_info() -> None:
+    options = hidden_window_options()
+
+    assert options["creationflags"] & subprocess.CREATE_NO_WINDOW
+    startupinfo = options["startupinfo"]
+    assert startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW
+    assert startupinfo.wShowWindow == subprocess.SW_HIDE
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only process policy")
+def test_worker_policy_hides_dependency_subprocesses(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    captured: dict[str, object] = {}
+
+    class FakePopen:
+        def __init__(self, _command, **kwargs):  # type: ignore[no-untyped-def]
+            captured.update(kwargs)
+
+    monkeypatch.setattr("drawing_renamer.subprocess_visibility.subprocess.Popen", FakePopen)
+    install_hidden_subprocess_policy()
+    subprocess.Popen(["hardware-probe"])  # type: ignore[call-overload]
+
+    assert int(captured["creationflags"]) & subprocess.CREATE_NO_WINDOW
+    startupinfo = captured["startupinfo"]
+    assert isinstance(startupinfo, subprocess.STARTUPINFO)
+    assert startupinfo.dwFlags & subprocess.STARTF_USESHOWWINDOW
+    assert startupinfo.wShowWindow == subprocess.SW_HIDE
