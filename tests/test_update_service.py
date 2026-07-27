@@ -144,6 +144,33 @@ def test_check_selects_matching_edition_and_digest(monkeypatch) -> None:  # type
     assert info.asset.size == 123
 
 
+def test_online_edition_falls_back_to_portable_release(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    digest = "b" * 64
+    portable_name = "DrawingPdfRenamer-v0.1.5-windows-portable.zip"
+    payload = {
+        "tag_name": "v0.1.5",
+        "assets": [
+            {
+                "name": portable_name,
+                "browser_download_url": "https://example.invalid/portable.zip",
+                "size": 456,
+                "digest": f"sha256:{digest}",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        update_service,
+        "_open_url",
+        lambda request, timeout: FakeResponse(json.dumps(payload).encode("utf-8")),
+    )
+
+    info = UpdateService("example/repo").check("0.1.4", "online")
+
+    assert info is not None
+    assert info.asset.name == portable_name
+    assert info.asset.sha256 == digest
+
+
 def test_check_returns_none_when_current_version_is_latest(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     payload = {"tag_name": "v0.1.2", "assets": []}
     monkeypatch.setattr(

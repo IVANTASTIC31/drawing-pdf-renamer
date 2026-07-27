@@ -1104,11 +1104,22 @@ class MainWindow(QMainWindow):
     def _install_prepared_update(self, prepared: PreparedUpdate) -> None:
         if distribution_edition() != "portable":
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(prepared.archive_path)))
+            if prepared.info.asset.name.endswith("-portable.zip"):
+                message = (
+                    "从 v0.1.5 起不再发布联网安装版，免安装版压缩包已经下载并打开。\n\n"
+                    "请将压缩包完整解压到一个新文件夹，然后运行 DrawingPdfRenamer.exe；"
+                    "不需要再运行“安装依赖.bat”。\n\n"
+                    "确认新版可以正常使用后，可自行删除旧的联网安装版目录。"
+                )
+            else:
+                message = (
+                    "新版压缩包已经下载并打开。\n\n"
+                    "请关闭本程序，完整解压后按照压缩包内的说明运行。"
+                )
             QMessageBox.information(
                 self,
                 "安装包已下载",
-                "联网安装版的新版压缩包已经下载并打开。\n\n"
-                "请关闭本程序，解压覆盖程序文件，然后重新运行“安装依赖.bat”。",
+                message,
             )
             self.update_action.setText(f"已下载 v{prepared.info.version}")
             return

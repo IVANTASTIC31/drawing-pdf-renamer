@@ -173,8 +173,20 @@ class UpdateService:
         expected_name = f"DrawingPdfRenamer-v{version}-windows-{edition}.zip"
         assets = [item for item in payload.get("assets", []) if isinstance(item, dict)]
         asset = next((item for item in assets if item.get("name") == expected_name), None)
+        if asset is None and edition == "online":
+            portable_name = f"DrawingPdfRenamer-v{version}-windows-portable.zip"
+            asset = next((item for item in assets if item.get("name") == portable_name), None)
+            if asset is not None:
+                logger.info(
+                    "Online package is no longer published; using portable package: %s",
+                    portable_name,
+                )
+                expected_name = portable_name
         if asset is None:
-            raise UpdateError(f"最新版尚未提供当前版本对应的安装包：{expected_name}")
+            raise UpdateError(
+                f"最新版本尚未提供可用的 Windows 免安装包："
+                f"DrawingPdfRenamer-v{version}-windows-portable.zip"
+            )
         download_url = str(asset.get("browser_download_url") or "")
         if not download_url.startswith("https://"):
             raise UpdateError("最新版安装包的下载地址无效")

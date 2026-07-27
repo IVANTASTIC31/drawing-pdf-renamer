@@ -1,6 +1,6 @@
 [project]
 name = "drawing-pdf-renamer"
-version = "0.1.4"
+version = "0.1.5"
 description = "Semi-automatic engineering drawing PDF renamer"
 requires-python = ">=3.11"
 dependencies = [

@@ -51,7 +51,7 @@ Windows 桌面小程序。用户在 PDF 预览中调整“物料编码、名称�
 - 顶部“问题反馈日志”可查看运行日志并导出 ZIP 反馈包
 - 顶部“检查更新”每天自动连接一次公开的 GitHub Release；发现新版后由用户确认下载
 - 免安装版支持下载进度、SHA-256 校验、退出后自动替换、失败回滚和自动重启
-- 更新检查和下载不会上传PDF、识别内容、历史记录或日志；联网安装版下载后提示人工覆盖并重装依赖
+- 更新检查和下载不会上传PDF、识别内容、历史记录或日志；旧联网安装版升级时会引导迁移到免安装版
 
 ## 开发运行
 
@@ -90,12 +90,12 @@ $env:PYTHONPATH = "src"
 
 ## 构建 Windows 发行版
 
-发行脚本会同时生成联网安装版和包含 Python、依赖及 OCR 模型的免安装便携版：
+发行脚本只生成包含 Python、依赖及 OCR 模型的 Windows 免安装便携版：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install pyinstaller
-powershell -ExecutionPolicy Bypass -File .\release\build_release.ps1 -Version 0.1.4
+powershell -ExecutionPolicy Bypass -File .\release\build_release.ps1 -Version 0.1.5
 ```
 
-构建结果位于 `dist\release`。脚本仅按白名单复制运行文件，不会打包 `.venv`、Git 数据、
-测试、PDF、截图、日志或历史记录，并会为 ZIP 生成 SHA-256 校验文件。
+构建结果位于 `dist\release`。脚本不会打包 `.venv`、Git 数据、测试、PDF、截图、日志或
+历史记录，并会为免安装 ZIP 生成 SHA-256 校验文件。从 v0.1.5 起不再生成联网安装版。
