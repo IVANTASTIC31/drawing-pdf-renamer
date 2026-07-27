@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .diagnostics import mark_clean_exit, setup_diagnostics
@@ -24,6 +25,14 @@ def configure_runtime_environment() -> None:
         os.environ["PADDLE_PDX_CACHE_HOME"] = str(bundled_cache)
 
 
+def application_icon_path() -> Path:
+    if getattr(sys, "frozen", False):
+        root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    else:
+        root = Path(__file__).resolve().parents[2]
+    return root / "assets" / "app-logo.png"
+
+
 def main(update_success_marker: Path | None = None) -> int:
     configure_runtime_environment()
     diagnostics = setup_diagnostics()
@@ -35,6 +44,9 @@ def main(update_success_marker: Path | None = None) -> int:
         app = QApplication(sys.argv)
         app.setApplicationName("工程图纸 PDF 半自动重命名")
         app.setOrganizationName("湖州三井低温设备有限公司")
+        icon_path = application_icon_path()
+        if icon_path.is_file():
+            app.setWindowIcon(QIcon(str(icon_path)))
         app.aboutToQuit.connect(lambda: mark_clean_exit(diagnostics))
         window = MainWindow(diagnostics)
         window.show()

@@ -28,7 +28,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
-    QProgressDialog,
     QPushButton,
     QSizePolicy,
     QSplitter,
@@ -50,6 +49,7 @@ from ..ocr_service import SuggestionResult
 from ..pdf_service import PdfService
 from ..rename_service import RenameService
 from ..update_service import (
+    DownloadProgress,
     PreparedUpdate,
     UpdateCancelledError,
     UpdateError,
@@ -60,7 +60,7 @@ from ..update_service import (
 from .document_view import COLORS, DocumentGraphicsView
 from .history_dialog import HistoryDialog
 from .log_dialog import LogDialog
-from .update_dialog import UpdateDialog
+from .update_dialog import UpdateDialog, UpdateDownloadDialog
 
 
 logger = logging.getLogger("drawing_renamer.ui")
@@ -134,11 +134,11 @@ class MainWindow(QMainWindow):
         self._update_operation = ""
         self._update_interactive = False
         self._update_cancel = threading.Event()
-        self._update_progress_queue: SimpleQueue[tuple[int, int]] = SimpleQueue()
+        self._update_progress_queue: SimpleQueue[DownloadProgress] = SimpleQueue()
         self._update_timer = QTimer(self)
         self._update_timer.setInterval(100)
         self._update_timer.timeout.connect(self._poll_update_operation)
-        self._update_progress_dialog: QProgressDialog | None = None
+        self._update_progress_dialog: UpdateDownloadDialog | None = None
 
         self.field_edits: dict[FieldKind, QLineEdit] = {}
         self.field_confidence: dict[FieldKind, QLabel] = {}
@@ -964,7 +964,7 @@ class MainWindow(QMainWindow):
         self._update_operation = "check"
         self.update_action.setEnabled(False)
         self.update_action.setText("正在检查更新…")
-        self.statusBar().showMessage("正在连接 GitHub 检查新版本…")
+        self.statusBar().showMessage("正在连接 Gitee 国内镜像检查新版本…")
         self._update_future = self.update_executor.submit(
             self.update_service.check,
             __version__,
@@ -1002,18 +1002,12 @@ class MainWindow(QMainWindow):
 
         self._update_cancel.clear()
         self._update_operation = "download"
-        self._update_progress_dialog = QProgressDialog(
-            "正在下载安装包…",
-            "取消下载",
-            0,
-            1000,
+        self._update_progress_dialog = UpdateDownloadDialog(
+            info.version,
+            info.asset.source,
             self,
         )
-        self._update_progress_dialog.setWindowTitle(f"更新到 v{info.version}")
-        self._update_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        self._update_progress_dialog.setAutoClose(False)
-        self._update_progress_dialog.setAutoReset(False)
-        self._update_progress_dialog.canceled.connect(self._update_cancel.set)
+        self._update_progress_dialog.cancel_requested.connect(self._update_cancel.set)
         self._update_progress_dialog.show()
         update_root = (
             self.diagnostics.data_directory if self.diagnostics else app_data_directory()
@@ -1022,7 +1016,7 @@ class MainWindow(QMainWindow):
             self.update_service.download_and_prepare,
             info,
             update_root,
-            lambda downloaded, total: self._update_progress_queue.put((downloaded, total)),
+            self._update_progress_queue.put,
             self._update_cancel.is_set,
         )
         self._update_timer.start()
@@ -1030,21 +1024,12 @@ class MainWindow(QMainWindow):
     def _poll_update_operation(self) -> None:
         while True:
             try:
-                downloaded, total = self._update_progress_queue.get_nowait()
+                progress = self._update_progress_queue.get_nowait()
             except Empty:
                 break
             dialog = self._update_progress_dialog
             if dialog is not None:
-                if total > 0:
-                    dialog.setValue(min(1000, int(downloaded * 1000 / total)))
-                    dialog.setLabelText(
-                        f"正在下载：{downloaded / 1024 / 1024:.1f} MB / "
-                        f"{total / 1024 / 1024:.1f} MB"
-                    )
-                else:
-                    dialog.setLabelText(
-                        f"正在下载：{downloaded / 1024 / 1024:.1f} MB"
-                    )
+                dialog.update_progress(progress)
 
         future = self._update_future
         if future is None or not future.done():
@@ -1056,7 +1041,7 @@ class MainWindow(QMainWindow):
         self._update_timer.stop()
         self.update_action.setEnabled(True)
         if self._update_progress_dialog is not None:
-            self._update_progress_dialog.close()
+            self._update_progress_dialog.finish_and_close()
             self._update_progress_dialog.deleteLater()
             self._update_progress_dialog = None
 

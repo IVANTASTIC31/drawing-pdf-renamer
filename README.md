@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/app-logo.png" width="128" alt="工程图纸 PDF 半自动重命名 Logo">
+</p>
+
 # 工程图纸 PDF 半自动重命名
 
 Windows 桌面小程序。用户在 PDF 预览中调整“物料编码、名称、工序编号”三个彩色识别框，OCR 只读取框内内容；人工确认全部文件后，程序统一安全重命名。
@@ -49,8 +53,10 @@ Windows 桌面小程序。用户在 PDF 预览中调整“物料编码、名称�
 - 批量重命名后，文件列表显示真实的新文件名，并提醒用户检查无误后再移动PDF
 - 已重命名文件支持重新框选、重新识别和“重命名选中文件”单独修正；重新载入后只要新名称与当前名称不同也可直接修正
 - 顶部“问题反馈日志”可查看运行日志并导出 ZIP 反馈包
-- 顶部“检查更新”每天自动连接一次公开的 GitHub Release；发现新版后由用户确认下载
-- 免安装版支持下载进度、SHA-256 校验、退出后自动替换、失败回滚和自动重启
+- 顶部“检查更新”每天最多检查一次；发现新版后由用户确认下载
+- 免安装版优先使用 Gitee 国内分卷镜像，镜像异常时自动切换 GitHub 备用源
+- 更新窗口显示下载百分比、已下载容量、实时速度、预计剩余时间和当前下载源
+- 免安装版支持 SHA-256 校验、退出后自动替换、失败回滚和自动重启
 - 更新检查和下载不会上传PDF、识别内容、历史记录或日志；旧联网安装版升级时会引导迁移到免安装版
 
 ## 开发运行
@@ -94,8 +100,10 @@ $env:PYTHONPATH = "src"
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install pyinstaller
-powershell -ExecutionPolicy Bypass -File .\release\build_release.ps1 -Version 0.1.5
+powershell -ExecutionPolicy Bypass -File .\release\build_release.ps1 -Version 0.1.6
 ```
 
 构建结果位于 `dist\release`。脚本不会打包 `.venv`、Git 数据、测试、PDF、截图、日志或
 历史记录，并会为免安装 ZIP 生成 SHA-256 校验文件。从 v0.1.5 起不再生成联网安装版。
+`release\prepare_gitee_mirror.ps1` 可将免安装 ZIP 切分为不超过 90 MiB 的 Gitee
+Release 分卷，并生成自动更新清单。

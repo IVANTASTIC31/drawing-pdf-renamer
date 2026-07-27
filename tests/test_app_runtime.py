@@ -13,3 +13,10 @@ def test_frozen_runtime_uses_bundled_paddle_models(monkeypatch, tmp_path: Path) 
     app.configure_runtime_environment()
 
     assert app.os.environ["PADDLE_PDX_CACHE_HOME"] == str(cache)
+
+
+def test_source_runtime_logo_is_available() -> None:
+    icon_path = app.application_icon_path()
+
+    assert icon_path.name == "app-logo.png"
+    assert icon_path.is_file()

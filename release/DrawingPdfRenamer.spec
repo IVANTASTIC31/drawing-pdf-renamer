@@ -24,7 +24,21 @@ if missing_models:
         + f"。期望目录：{model_root}"
     )
 
-datas = [(str(model_root / name), f"paddlex_cache/official_models/{name}") for name in required_models]
+datas = []
+for model_name in required_models:
+    model_path = model_root / model_name
+    for source_file in model_path.rglob("*"):
+        if not source_file.is_file():
+            continue
+        relative_parent = source_file.parent.relative_to(model_path)
+        destination = (
+            Path("paddlex_cache")
+            / "official_models"
+            / model_name
+            / relative_parent
+        )
+        datas.append((str(source_file), str(destination)))
+datas.append((str(project_root / "assets" / "app-logo.png"), "assets"))
 binaries = []
 hiddenimports = []
 for package in ("paddle", "paddleocr", "paddlex", "cv2", "bidi", "pypdfium2"):
@@ -65,6 +79,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    icon=str(project_root / "assets" / "app-logo.ico"),
     disable_windowed_traceback=False,
 )
 coll = COLLECT(

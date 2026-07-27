@@ -1,0 +1,39 @@
+{
+    "version":  "0.1.6",
+    "tag_name":  "v0.1.6",
+    "notes":  "## 工程图纸 PDF 半自动重命名工具 v0.1.6\n\n本版本继续只提供 **Windows 免安装便携版**：\n\n- 下载 `DrawingPdfRenamer-v0.1.6-windows-portable.zip`\n- 将压缩包完整解压到一个新文件夹\n- 双击 `DrawingPdfRenamer.exe`，无需安装 Python 或运行依赖安装脚本\n- 请勿让 `DrawingPdfRenamer.exe` 与 `_internal` 文件夹分离\n\n本次更新：\n\n- 全新更新下载窗口，清晰显示进度百分比、已下载容量、实时速度和预计剩余时间\n- 自动更新优先使用 Gitee 国内分卷镜像；镜像不可用时自动切换 GitHub 备用源\n- Gitee 分卷在本机按顺序合并，并对完整 ZIP 执行 SHA-256 校验后再安装\n- 新增原创项目 Logo，并同步用于主程序窗口、任务栏和 Windows EXE 图标\n- 保留 v0.1.5 的多页 PDF、异常文件跳过和文件列表清理功能\n\n已有功能：\n\n- 多页 PDF 预览、翻页、放大高清重绘、旋转与人工彩色框选\n- 物料编码、名称、工序编号 OCR，以及人工核对和修改\n- 后台串行 OCR 队列，可在识别当前图纸时继续框选下一份\n- 批量重命名、单文件纠错、历史记录和正则搜索\n- 更新失败回滚、自动重启、运行日志和问题反馈包\n\n安全说明：\n\n- 发行包不包含用户 PDF、截图、历史记录、运行日志或开发虚拟环境\n- `CHECKSUMS-SHA256.txt` 提供免安装 ZIP 的完整性校验值\n- Gitee 与 GitHub 下载均只获取公开发行文件，不会上传图纸或识别结果\n- Windows 或杀毒软件首次打开时可能进行安全扫描",
+    "release_url":  "https://gitee.com/IVANTASTIC31/drawing-pdf-renamer/releases/tag/v0.1.6",
+    "published_at":  "2026-07-27T15:03:04.2436427+08:00",
+    "asset":  {
+                  "name":  "DrawingPdfRenamer-v0.1.6-windows-portable.zip",
+                  "size":  320329088,
+                  "sha256":  "66fffb5da01fb7c86f357fe989ff35f9cd2bb3d8281626e04fb119cce80f180a",
+                  "fallback_url":  "https://github.com/IVANTASTIC31/drawing-pdf-renamer/releases/download/v0.1.6/DrawingPdfRenamer-v0.1.6-windows-portable.zip",
+                  "parts":  [
+                                {
+                                    "name":  "DrawingPdfRenamer-v0.1.6-windows-portable.zip.001",
+                                    "url":  "https://gitee.com/IVANTASTIC31/drawing-pdf-renamer/releases/download/v0.1.6/DrawingPdfRenamer-v0.1.6-windows-portable.zip.001",
+                                    "size":  94371840,
+                                    "sha256":  "4ad330c7676435c7c7095eafe7a3395d442ffb29da1e31c9bb34fe52cb7cb3bb"
+                                },
+                                {
+                                    "name":  "DrawingPdfRenamer-v0.1.6-windows-portable.zip.002",
+                                    "url":  "https://gitee.com/IVANTASTIC31/drawing-pdf-renamer/releases/download/v0.1.6/DrawingPdfRenamer-v0.1.6-windows-portable.zip.002",
+                                    "size":  94371840,
+                                    "sha256":  "8dbfb9ae869a1383a5658bc9755669105cc74f8e37b19df9f37b1f63c7595591"
+                                },
+                                {
+                                    "name":  "DrawingPdfRenamer-v0.1.6-windows-portable.zip.003",
+                                    "url":  "https://gitee.com/IVANTASTIC31/drawing-pdf-renamer/releases/download/v0.1.6/DrawingPdfRenamer-v0.1.6-windows-portable.zip.003",
+                                    "size":  94371840,
+                                    "sha256":  "0e09a4433e161d9d3ef82d4571b5db8166bd1e3c9f8a2dc0e4df599b8b61f0ee"
+                                },
+                                {
+                                    "name":  "DrawingPdfRenamer-v0.1.6-windows-portable.zip.004",
+                                    "url":  "https://gitee.com/IVANTASTIC31/drawing-pdf-renamer/releases/download/v0.1.6/DrawingPdfRenamer-v0.1.6-windows-portable.zip.004",
+                                    "size":  37213568,
+                                    "sha256":  "df3dcbc70f2c8efa864e01003aa450e7b0ba047c87d647d55f017d34d77e61b2"
+                                }
+                            ]
+              }
+}
