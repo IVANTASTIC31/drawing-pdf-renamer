@@ -34,6 +34,27 @@ def test_execute_renames_and_writes_log(tmp_path: Path) -> None:
     assert list((tmp_path / "logs").glob("rename_log_*.csv"))
 
 
+def test_execute_skips_abnormal_file_without_blocking_confirmed_file(tmp_path: Path) -> None:
+    normal_source = tmp_path / "normal.pdf"
+    abnormal_source = tmp_path / "abnormal.pdf"
+    normal_source.write_bytes(b"normal")
+    abnormal_source.write_bytes(b"abnormal")
+    normal = confirmed(normal_source, "B.001_泵体_CP41.100A.pdf")
+    abnormal = DrawingDocument(abnormal_source)
+    abnormal.status = DocumentStatus.ERROR
+    abnormal.error = "PDF无法打开"
+
+    service = RenameService()
+    assert service.validate_batch([normal, abnormal]) == []
+    results = service.execute([normal, abnormal], tmp_path / "logs")
+
+    assert results[0].success
+    assert results[1].skipped
+    assert abnormal_source.is_file()
+    assert abnormal.status == DocumentStatus.ERROR
+    assert (tmp_path / "B.001_泵体_CP41.100A.pdf").is_file()
+
+
 def test_execute_one_corrects_an_already_renamed_file(tmp_path: Path) -> None:
     source = tmp_path / "B.001_泵体_错误.pdf"
     source.write_bytes(b"pdf")

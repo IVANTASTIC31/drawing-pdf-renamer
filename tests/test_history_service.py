@@ -15,7 +15,10 @@ def test_history_saves_screenshot_and_structured_box_data(tmp_path) -> None:
     document = DrawingDocument(source)
     document.proposed_filename = "B.001_泵体_CP41.100A.pdf"
     document.rotation = 90
+    document.page_count = 2
+    document.page_index = 1
     document.boxes[FieldKind.MATERIAL] = NormalizedRect(0.1, 0.2, 0.3, 0.1)
+    document.box_pages[FieldKind.MATERIAL] = 1
     document.fields[FieldKind.MATERIAL].text = "B.001"
     document.fields[FieldKind.MATERIAL].confidence = 0.99
     service = HistoryService(tmp_path / "history")
@@ -30,7 +33,10 @@ def test_history_saves_screenshot_and_structured_box_data(tmp_path) -> None:
     assert len(entries) == 1
     assert entries[0].proposed_filename == document.proposed_filename
     assert entries[0].rotation == 90
+    assert entries[0].page_index == 1
+    assert entries[0].page_count == 2
     assert entries[0].boxes[FieldKind.MATERIAL.value]["x"] == 0.1
+    assert entries[0].boxes[FieldKind.MATERIAL.value]["page"] == 2
     assert entries[0].fields[FieldKind.MATERIAL.value]["text"] == "B.001"
 
 

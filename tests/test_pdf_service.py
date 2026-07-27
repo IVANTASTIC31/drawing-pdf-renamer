@@ -57,3 +57,34 @@ def test_render_region_respects_preview_rotation(tmp_path) -> None:
     )
 
     assert image.height > image.width * 3
+
+
+def test_multi_page_pdf_can_render_each_page_and_region(tmp_path) -> None:
+    path = tmp_path / "multi-page.pdf"
+    document = fitz.open()
+    first = document.new_page(width=200, height=100)
+    first.draw_rect(first.rect, color=(1, 0, 0), fill=(1, 0, 0))
+    second = document.new_page(width=200, height=100)
+    second.draw_rect(second.rect, color=(0, 0, 1), fill=(0, 0, 1))
+    document.save(path)
+    document.close()
+
+    service = PdfService()
+    assert service.page_count(path) == 2
+    first_image = service.render_page(path, 0)
+    second_image = service.render_page(path, 1)
+    second_region = service.render_region(
+        path,
+        NormalizedRect(0.25, 0.25, 0.5, 0.5),
+        page_index=1,
+    )
+
+    first_pixel = first_image.getpixel((first_image.width // 2, first_image.height // 2))
+    second_pixel = second_image.getpixel((second_image.width // 2, second_image.height // 2))
+    region_pixel = second_region.getpixel((second_region.width // 2, second_region.height // 2))
+    assert first_pixel[0] > 240 and first_pixel[2] < 20
+    assert second_pixel[2] > 240 and second_pixel[0] < 20
+    assert region_pixel[2] > 240 and region_pixel[0] < 20
+
+    with pytest.raises(ValueError, match="页码超出范围"):
+        service.render_page(path, 2)

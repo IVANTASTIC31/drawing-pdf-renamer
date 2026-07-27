@@ -70,6 +70,7 @@ logger = logging.getLogger("drawing_renamer.ui")
 class PreviewRenderRequest:
     serial: int
     path: Path
+    page_index: int
     rotation: int
     rect: NormalizedRect
     dpi: int
@@ -93,7 +94,7 @@ class MainWindow(QMainWindow):
 
         self.documents: list[DrawingDocument] = []
         self.current_index = -1
-        self.base_images: dict[Path, Image.Image] = {}
+        self.base_images: dict[Path | tuple[Path, int], Image.Image] = {}
         self.pdf = PdfService()
         self.ocr = IsolatedOcrService()
         self.renamer = RenameService()
@@ -220,6 +221,11 @@ class MainWindow(QMainWindow):
         self.history_button.setToolTip("查看确认时保存的现场画面、框坐标和OCR结果")
         self.history_button.clicked.connect(self.show_history_dialog)
         title_row.addWidget(self.history_button)
+        self.clear_list_button = QPushButton("清空列表")
+        self.clear_list_button.setObjectName("clearListButton")
+        self.clear_list_button.setToolTip("仅清空软件中的文件列表，不删除PDF、历史记录或日志")
+        self.clear_list_button.clicked.connect(self.clear_file_list)
+        title_row.addWidget(self.clear_list_button)
         left_layout.addLayout(title_row)
         self.progress_label = QLabel("尚未添加 PDF")
         self.progress_label.setObjectName("muted")
@@ -251,6 +257,24 @@ class MainWindow(QMainWindow):
         )
         self.instruction.setObjectName("hint")
         preview_layout.addWidget(self.instruction)
+        self.page_navigation = QWidget()
+        page_navigation_layout = QHBoxLayout(self.page_navigation)
+        page_navigation_layout.setContentsMargins(6, 0, 6, 2)
+        page_navigation_layout.addStretch()
+        self.previous_page_button = QPushButton("上一页")
+        self.previous_page_button.clicked.connect(lambda: self.change_page(-1))
+        page_navigation_layout.addWidget(self.previous_page_button)
+        self.page_label = QLabel("第 1 / 1 页")
+        self.page_label.setObjectName("fieldCaption")
+        self.page_label.setMinimumWidth(120)
+        self.page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        page_navigation_layout.addWidget(self.page_label)
+        self.next_page_button = QPushButton("下一页")
+        self.next_page_button.clicked.connect(lambda: self.change_page(1))
+        page_navigation_layout.addWidget(self.next_page_button)
+        page_navigation_layout.addStretch()
+        self.page_navigation.setVisible(False)
+        preview_layout.addWidget(self.page_navigation)
         self.preview = DocumentGraphicsView()
         self.preview.boxesChanged.connect(self._save_current_boxes)
         self.preview.boxFinished.connect(self._box_finished)
@@ -327,7 +351,7 @@ class MainWindow(QMainWindow):
         self.busy_bar.setMaximumWidth(180)
         self.busy_bar.hide()
         status.addPermanentWidget(self.busy_bar)
-        status.showMessage("请添加单页 PDF")
+        status.showMessage("请添加 PDF")
 
     def _create_field_card(self, kind: FieldKind, shortcut_number: int) -> QFrame:
         card = QFrame()
@@ -455,6 +479,8 @@ class MainWindow(QMainWindow):
             #renameSingleButton:hover { background: #b42318; border-color: #912018; }
             #renameSingleButton:pressed { background: #8f1d14; border-color: #75160f; }
             #renameSingleButton:disabled { background: #f1f3f5; color: #9aa2ac; border-color: #d7dce2; }
+            #clearListButton { color: #b42318; border: 1px solid #e2a39d; font-weight: 600; }
+            #clearListButton:hover { background: #fff0ee; border-color: #d92d20; }
             #sectionTitle { font-size: 19px; font-weight: 700; }
             #fieldCaption { font-weight: 600; }
             #muted { color: #727b86; font-size: 12px; }
@@ -495,26 +521,60 @@ class MainWindow(QMainWindow):
     def _background_ocr_active(self) -> bool:
         return bool(self._active_ocr_job or self._ocr_jobs or self._ocr_queue_future)
 
-    def _get_cached_base_image(self, path: Path) -> Image.Image | None:
-        image = self.base_images.pop(path, None)
+    @staticmethod
+    def _page_cache_key(path: Path, page_index: int) -> Path | tuple[Path, int]:
+        # Keep page zero keyed by Path for compatibility with older sessions/tests.
+        return path if page_index == 0 else (path, page_index)
+
+    def _get_cached_base_image(self, path: Path, page_index: int = 0) -> Image.Image | None:
+        key = self._page_cache_key(path, page_index)
+        image = self.base_images.pop(key, None)
         if image is not None:
-            self.base_images[path] = image
+            self.base_images[key] = image
         return image
 
-    def _cache_base_image(self, path: Path, image: Image.Image) -> None:
-        self.base_images.pop(path, None)
-        self.base_images[path] = image
+    def _cache_base_image(
+        self,
+        path: Path,
+        image: Image.Image,
+        page_index: int = 0,
+    ) -> None:
+        key = self._page_cache_key(path, page_index)
+        replaced = self.base_images.pop(key, None)
+        if replaced is not None and replaced is not image:
+            replaced.close()
+        self.base_images[key] = image
         while len(self.base_images) > self.MAX_CACHED_PAGES:
-            oldest_path = next(iter(self.base_images))
-            self.base_images.pop(oldest_path, None)
-            logger.info("Evicted PDF preview cache: path=%s", oldest_path)
+            oldest_key = next(iter(self.base_images))
+            evicted = self.base_images.pop(oldest_key)
+            evicted.close()
+            logger.info("Evicted PDF preview cache: key=%s", oldest_key)
 
-    def _load_base_image(self, path: Path) -> Image.Image:
-        image = self._get_cached_base_image(path)
+    def _load_base_image(self, path: Path, page_index: int = 0) -> Image.Image:
+        image = self._get_cached_base_image(path, page_index)
         if image is None:
-            image = self.pdf.render_first_page(path)
-            self._cache_base_image(path, image)
+            image = self.pdf.render_page(path, page_index)
+            self._cache_base_image(path, image, page_index)
         return image
+
+    def _move_cached_pages(self, old_path: Path, new_path: Path) -> None:
+        moved: list[tuple[int, Image.Image]] = []
+        for key in list(self.base_images):
+            key_path, page_index = (key, 0) if isinstance(key, Path) else key
+            if key_path == old_path:
+                moved.append((page_index, self.base_images.pop(key)))
+        for page_index, image in moved:
+            self._cache_base_image(new_path, image, page_index)
+
+    def _boxes_on_current_page(
+        self,
+        document: DrawingDocument,
+    ) -> dict[FieldKind, NormalizedRect]:
+        return {
+            kind: rect
+            for kind, rect in document.boxes.items()
+            if document.box_page(kind) == document.page_index
+        }
 
     def add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "添加 PDF", "", "PDF 文件 (*.pdf)")
@@ -531,6 +591,54 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "未找到 PDF", "所选文件夹及其子文件夹中没有真实的 PDF 文件。")
                 return
             self._append_paths(paths)
+
+    def clear_file_list(self) -> None:
+        """Forget the current working set without deleting user files or history."""
+
+        if not self.documents:
+            self.statusBar().showMessage("文件列表已经是空的")
+            return
+        if self._busy or self._background_ocr_active:
+            QMessageBox.information(
+                self,
+                "暂不能清空列表",
+                "当前仍有OCR识别任务。请先点击“取消识别”并等待任务结束，再清空文件列表。",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "清空文件列表",
+            f"即将从软件列表中移除 {len(self.documents)} 个PDF。\n\n"
+            "这不会删除或改名任何PDF，也不会清除历史记录和问题反馈日志。\n\n"
+            "确认清空吗？",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        logger.info("Clearing document list: count=%s", len(self.documents))
+        self._invalidate_preview_render()
+        self.exit_box_selection()
+        self.documents.clear()
+        self.current_index = -1
+        self.file_list.blockSignals(True)
+        self.file_list.clear()
+        self.file_list.blockSignals(False)
+        for image in self.base_images.values():
+            image.close()
+        self.base_images.clear()
+        self.preview.clear_document()
+        self._loading_fields = True
+        for kind in FieldKind:
+            self.field_edits[kind].clear()
+            self.field_confidence[kind].setText("未识别")
+        self.filename_preview.clear()
+        self._loading_fields = False
+        self.ocr_status.setText("等待处理")
+        self.page_navigation.setVisible(False)
+        self.page_label.setText("第 1 / 1 页")
+        self._reset_ocr_progress()
+        self._refresh_list()
+        self.statusBar().showMessage("文件列表已清空；原PDF、历史记录和日志均未删除")
 
     def _append_paths(self, paths: list[Path]) -> None:
         known = {document.path.resolve() for document in self.documents}
@@ -591,16 +699,28 @@ class MainWindow(QMainWindow):
             self.auto_suggest_action.isChecked(),
         )
         try:
-            base = self._load_base_image(document.path)
-            logger.info("PDF preview ready: path=%s size=%sx%s", document.path, base.width, base.height)
+            if document.path.is_file() and not document.page_count_loaded:
+                document.page_count = self.pdf.page_count(document.path)
+                document.page_count_loaded = True
+            document.page_index = min(max(document.page_index, 0), document.page_count - 1)
+            base = self._load_base_image(document.path, document.page_index)
+            logger.info(
+                "PDF preview ready: path=%s page=%s/%s size=%sx%s",
+                document.path,
+                document.page_index + 1,
+                document.page_count,
+                base.width,
+                base.height,
+            )
             image = self.pdf.rotate(base, document.rotation)
             self.preview.set_image(
                 image,
-                document.boxes,
+                self._boxes_on_current_page(document),
                 preview_dpi=self.pdf.PREVIEW_DPI,
                 max_detail_dpi=self.pdf.MAX_DETAIL_DPI,
                 preserve_view=True,
             )
+            self._update_page_controls(document)
             self._load_fields(document)
             if document.path.is_file():
                 self.statusBar().showMessage(str(document.path))
@@ -618,8 +738,48 @@ class MainWindow(QMainWindow):
             logger.exception("Unable to open PDF: %s", document.path)
             document.status = DocumentStatus.ERROR
             document.error = str(exc)
+            self.preview.clear_document()
+            self._load_fields(document)
+            self._update_page_controls(document)
             QMessageBox.warning(self, "无法打开 PDF", str(exc))
             self._refresh_list()
+
+    def _update_page_controls(self, document: DrawingDocument | None = None) -> None:
+        document = document or self.current_document
+        if document is None:
+            self.page_navigation.setVisible(False)
+            self.page_label.setText("第 1 / 1 页")
+            return
+        document.page_count = max(document.page_count, 1)
+        document.page_index = min(max(document.page_index, 0), document.page_count - 1)
+        current_boxes = sum(
+            document.box_page(kind) == document.page_index for kind in document.boxes
+        )
+        suffix = f" · 当前页 {current_boxes} 个框" if document.boxes else ""
+        self.page_label.setText(
+            f"第 {document.page_index + 1} / {document.page_count} 页{suffix}"
+        )
+        self.previous_page_button.setEnabled(document.page_index > 0)
+        self.next_page_button.setEnabled(document.page_index + 1 < document.page_count)
+        self.page_navigation.setVisible(document.page_count > 1)
+
+    def change_page(self, offset: int) -> None:
+        document = self.current_document
+        if document is None or document.page_count <= 1:
+            return
+        target = min(max(document.page_index + offset, 0), document.page_count - 1)
+        if target == document.page_index:
+            return
+        self._save_current_boxes()
+        self.exit_box_selection()
+        document.page_index = target
+        logger.info(
+            "PDF page changed: path=%s page=%s/%s",
+            document.path,
+            target + 1,
+            document.page_count,
+        )
+        self.select_document(self.current_index)
 
     def _load_fields(self, document: DrawingDocument) -> None:
         self._loading_fields = True
@@ -720,9 +880,19 @@ class MainWindow(QMainWindow):
         self.rename_single_button.setEnabled(
             has_document and proposed_changed and source_exists and not self._busy
         )
+        eligible_batch = any(
+            item.status == DocumentStatus.CONFIRMED for item in self.documents
+        )
         self.execute_button.setEnabled(
+            eligible_batch and not self._busy and not self._background_ocr_active
+        )
+        self.clear_list_button.setEnabled(
             bool(self.documents) and not self._busy and not self._background_ocr_active
         )
+        if eligible_batch:
+            self.execute_button.setToolTip("只重命名已人工确认的文件；异常或未确认文件将跳过")
+        else:
+            self.execute_button.setToolTip("当前没有已人工确认、可批量重命名的文件")
         if not has_document:
             self.rename_single_button.setToolTip("请先选择一个PDF")
         elif not source_exists:
@@ -985,24 +1155,27 @@ class MainWindow(QMainWindow):
             "手动添加高亮框",
             "操作步骤：\n\n"
             "1. 在左侧选择要处理的PDF。\n"
-            "2. 点击下方彩色标签：\n"
+            "2. 多页PDF可用预览区上方的“上一页/下一页”切换；三个框可分别位于不同页面。\n"
+            "3. 点击下方彩色标签：\n"
             "   • 蓝色：物料编码\n"
             "   • 绿色：名称\n"
             "   • 橙色：工序编号\n"
-            "3. 鼠标移到PDF图纸，在对应文字外围按住左键并拖拽。\n"
-            "4. 松开鼠标后生成带标签的高亮框。\n"
-            "5. 完成一个框后会自动进入下一个框选标签。\n"
-            "6. 随时按 Esc 退出框选模式，之后可按住鼠标左键拖动图纸。\n"
-            "7. 拖动框体可以移动；拖动右下角可以调整大小。切换PDF时会保留当前缩放和视野位置，"
+            "4. 鼠标移到PDF图纸，在对应文字外围按住左键并拖拽。\n"
+            "5. 松开鼠标后生成带标签的高亮框；翻页不会丢失已完成的框。\n"
+            "6. 完成一个框后会自动进入下一个框选标签。\n"
+            "7. 随时按 Esc 退出框选模式，之后可按住鼠标左键拖动图纸。\n"
+            "8. 拖动框体可以移动；拖动右下角可以调整大小。切换PDF时会保留当前缩放和视野位置，"
             "需要返回全图时点击“适合窗口”。\n"
-            "8. 如需重画，再次点击彩色标签并重新拖拽；也可选中框后按 Delete。\n"
-            "9. 可点击每个字段下方的“仅识别此框”单独识别；三个框完成后也可点击“一键识别三个框”。\n"
-            "10. 三个框完成但尚未识别时，蓝色主按钮会显示“识别并下一份”；点击后任务进入后台队列，界面立即打开下一份PDF。\n"
-            "11. 左侧显示“等待识别、识别中、待确认”；后台完成后必须返回该文件人工核对，再点击“确认并下一份”。\n"
-            "12. OCR失败时，可以直接在下方输入框手工填写。确认时会保存现场画面和框选数据，可从左上角“历史记录”查看。\n"
-            "13. 批量重命名后请先检查新文件名再移动PDF。发现错误时，选中文件、重新框选和识别，"
+            "9. 如需重画，再次点击彩色标签并重新拖拽；也可选中框后按 Delete。\n"
+            "10. 可点击每个字段下方的“仅识别此框”单独识别；三个框完成后也可点击“一键识别三个框”。\n"
+            "11. 三个框完成但尚未识别时，蓝色主按钮会显示“识别并下一份”；点击后任务进入后台队列，界面立即打开下一份PDF。\n"
+            "12. 左侧显示“等待识别、识别中、待确认”；后台完成后必须返回该文件人工核对，再点击“确认并下一份”。\n"
+            "13. OCR失败时，可以直接在下方输入框手工填写。确认时会保存现场画面和框选数据，可从左上角“历史记录”查看。\n"
+            "14. 批量重命名只处理“已确认”文件；异常或未确认文件会跳过并提示，不会阻挡其他文件。\n"
+            "15. 左上角“清空列表”只移除当前列表，不会删除PDF、历史记录或日志。\n"
+            "16. 批量重命名后请先检查新文件名再移动PDF。发现错误时，选中文件、重新框选和识别，"
             "然后点击“重命名选中文件”。\n"
-            "14. 顶部“检查更新”可手动检查正式版；程序每天最多自动检查一次，下载安装前会要求确认。\n\n"
+            "17. 顶部“检查更新”可手动检查正式版；程序每天最多自动检查一次，下载安装前会要求确认。\n\n"
             "快捷键：1=物料编码，2=名称，3=工序编号，A=左转90°，D=右转90°，"
             "空格=执行蓝色主按钮，Esc=退出框选。\n"
             "输入框正在编辑时，单键快捷键不会触发；点击窗口其他区域即可退出输入状态。",
@@ -1027,16 +1200,29 @@ class MainWindow(QMainWindow):
         document = self.current_document
         if not document:
             return
-        boxes = self.preview.normalized_boxes()
-        changed = boxes != document.boxes
+        visible_boxes = self.preview.normalized_boxes()
+        previous_boxes = dict(document.boxes)
+        previous_pages = dict(document.box_pages)
+        kinds_on_page = {
+            kind
+            for kind in document.boxes
+            if document.box_page(kind) == document.page_index
+        }
+        for kind in kinds_on_page - set(visible_boxes):
+            document.boxes.pop(kind, None)
+            document.box_pages.pop(kind, None)
+        for kind, rect in visible_boxes.items():
+            document.boxes[kind] = rect
+            document.box_pages[kind] = document.page_index
+        changed = document.boxes != previous_boxes or document.box_pages != previous_pages
         if changed:
             document.ocr_revision += 1
-        document.boxes = boxes
         if document.status not in (DocumentStatus.CONFIRMED, DocumentStatus.RENAMED):
             if changed or document.status not in (DocumentStatus.OCR_QUEUED, DocumentStatus.OCR_RUNNING):
                 document.status = (
                     DocumentStatus.NEEDS_CONFIRMATION if document.boxes else DocumentStatus.NEEDS_BOXES
                 )
+        self._update_page_controls(document)
         self._update_recognize_all_button()
         self._update_action_buttons()
 
@@ -1104,7 +1290,16 @@ class MainWindow(QMainWindow):
         document.fields[kind].manually_edited = False
         self.field_edits[kind].clear()
         self.field_confidence[kind].setText("未识别")
-        self.preview.remove_box(kind)
+        if kind in document.boxes:
+            document.boxes.pop(kind, None)
+            document.box_pages.pop(kind, None)
+            document.ocr_revision += 1
+        if kind in self.preview.roi_items:
+            self.preview.remove_box(kind)
+        else:
+            self._update_page_controls(document)
+            self._update_recognize_all_button()
+            self._update_action_buttons()
         self._update_filename(document)
 
     def _delete_selected_box(self) -> None:
@@ -1221,14 +1416,16 @@ class MainWindow(QMainWindow):
         request = PreviewRenderRequest(
             serial=self._preview_request_serial,
             path=document.path,
+            page_index=document.page_index,
             rotation=document.rotation,
             rect=rect,
             dpi=dpi,
         )
         self._pending_preview_request = request
         logger.debug(
-            "High-resolution preview requested: path=%s rotation=%s dpi=%s rect=(%.4f,%.4f,%.4f,%.4f)",
+            "High-resolution preview requested: path=%s page=%s rotation=%s dpi=%s rect=(%.4f,%.4f,%.4f,%.4f)",
             request.path,
+            request.page_index + 1,
             request.rotation,
             request.dpi,
             request.rect.x,
@@ -1262,6 +1459,7 @@ class MainWindow(QMainWindow):
                 request.rect,
                 request.rotation,
                 request.dpi,
+                request.page_index,
             )
             return request, image
 
@@ -1287,6 +1485,7 @@ class MainWindow(QMainWindow):
                 request.serial == self._preview_request_serial
                 and current is not None
                 and current.path == request.path
+                and current.page_index == request.page_index
                 and current.rotation == request.rotation
             ):
                 self.preview.set_high_resolution_region(image, request.rect)
@@ -1328,17 +1527,22 @@ class MainWindow(QMainWindow):
         document = self.current_document
         if not document:
             return
-        base = self._load_base_image(document.path)
+        page_index = document.page_index
+        base = self._load_base_image(document.path, page_index)
         path = document.path
-        logger.info("Company-anchor suggestion requested for current PDF: %s", path)
+        logger.info(
+            "Company-anchor suggestion requested for current PDF: path=%s page=%s",
+            path,
+            page_index + 1,
+        )
         self._run_worker(
-            lambda: (path, self.ocr.suggest(base.copy())),
+            lambda: (path, page_index, self.ocr.suggest(base.copy())),
             self._suggestion_ready,
             "正在查找公司名称并生成建议框…最多等待120秒，可点击“取消识别”",
         )
 
-    def _suggestion_ready(self, payload: tuple[Path, SuggestionResult]) -> None:
-        path, result = payload
+    def _suggestion_ready(self, payload: tuple[Path, int, SuggestionResult]) -> None:
+        path, page_index, result = payload
         document = next((item for item in self.documents if item.path == path), None)
         if document is None:
             return
@@ -1351,6 +1555,7 @@ class MainWindow(QMainWindow):
             [kind.value for kind in result.recognized],
         )
         document.boxes = result.boxes
+        document.box_pages = {kind: page_index for kind in result.boxes}
         for kind, (text, confidence) in result.recognized.items():
             if not document.fields[kind].manually_edited:
                 document.fields[kind].text = text
@@ -1363,10 +1568,13 @@ class MainWindow(QMainWindow):
         self._update_filename(document)
         if document is self.current_document:
             self._invalidate_preview_render()
-            image = self.pdf.rotate(self._load_base_image(path), document.rotation)
+            image = self.pdf.rotate(
+                self._load_base_image(path, document.page_index),
+                document.rotation,
+            )
             self.preview.set_image(
                 image,
-                document.boxes,
+                self._boxes_on_current_page(document),
                 preview_dpi=self.pdf.PREVIEW_DPI,
                 max_detail_dpi=self.pdf.MAX_DETAIL_DPI,
             )
@@ -1387,8 +1595,17 @@ class MainWindow(QMainWindow):
             self.ocr_status.setText(f"请先框选{kind.label}")
             return
         path = document.path
-        logger.info("Single-box OCR requested: path=%s field=%s", path, kind.value)
-        image = self.pdf.rotate(self._load_base_image(path), document.rotation)
+        page_index = document.box_page(kind)
+        logger.info(
+            "Single-box OCR requested: path=%s page=%s field=%s",
+            path,
+            page_index + 1,
+            kind.value,
+        )
+        image = self.pdf.rotate(
+            self._load_base_image(path, page_index),
+            document.rotation,
+        )
         crop = self.pdf.crop(image, rect)
         self._run_worker(
             lambda: (path, kind, *self.ocr.recognize_text(crop)),
@@ -1473,10 +1690,18 @@ class MainWindow(QMainWindow):
         self._refresh_list()
 
     def _capture_ocr_crops(self, document: DrawingDocument) -> dict[FieldKind, Image.Image]:
-        base = self._load_base_image(document.path)
-        image = self.pdf.rotate(base, document.rotation)
         boxes = dict(document.boxes)
-        return {kind: self.pdf.crop(image, boxes[kind]) for kind in FieldKind}
+        page_images: dict[int, Image.Image] = {}
+        crops: dict[FieldKind, Image.Image] = {}
+        for kind in FieldKind:
+            page_index = document.box_page(kind)
+            image = page_images.get(page_index)
+            if image is None:
+                base = self._load_base_image(document.path, page_index)
+                image = self.pdf.rotate(base, document.rotation)
+                page_images[page_index] = image
+            crops[kind] = self.pdf.crop(image, boxes[kind])
+        return crops
 
     def _apply_recognition_values(
         self,
@@ -1656,10 +1881,13 @@ class MainWindow(QMainWindow):
         document.ocr_revision += 1
         if document.status not in (DocumentStatus.CONFIRMED, DocumentStatus.RENAMED):
             document.status = DocumentStatus.NEEDS_CONFIRMATION
-        image = self.pdf.rotate(self._load_base_image(document.path), document.rotation)
+        image = self.pdf.rotate(
+            self._load_base_image(document.path, document.page_index),
+            document.rotation,
+        )
         self.preview.set_image(
             image,
-            document.boxes,
+            self._boxes_on_current_page(document),
             preview_dpi=self.pdf.PREVIEW_DPI,
             max_detail_dpi=self.pdf.MAX_DETAIL_DPI,
         )
@@ -1785,9 +2013,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "单文件重命名失败", result.message)
             self._refresh_list()
             return
-        cached = self.base_images.pop(old_path, None)
-        if cached is not None:
-            self._cache_base_image(document.path, cached)
+        self._move_cached_pages(old_path, document.path)
         document.proposed_filename = document.path.name
         logger.info("Single-file correction completed: source=%s destination=%s", old_path, document.path)
         self._refresh_list()
@@ -1805,19 +2031,52 @@ class MainWindow(QMainWindow):
         if self._background_ocr_active:
             QMessageBox.information(self, "后台识别进行中", "请等待识别队列完成并逐份人工确认后再批量重命名。")
             return
+        eligible = [
+            document for document in self.documents if document.status == DocumentStatus.CONFIRMED
+        ]
+        skipped = [
+            document for document in self.documents if document.status != DocumentStatus.CONFIRMED
+        ]
+        if not eligible:
+            QMessageBox.information(
+                self,
+                "没有可重命名文件",
+                "当前没有“已确认”文件。异常、待处理、待确认或已经重命名的文件不会参与批量操作。",
+            )
+            return
         errors = self.renamer.validate_batch(self.documents)
         if errors:
             QMessageBox.warning(self, "暂不能重命名", "\n".join(errors[:12]))
             return
+        skipped_text = ""
+        if skipped:
+            examples = "\n".join(
+                f"• {document.path.name}（{document.status.value}）"
+                for document in skipped[:8]
+            )
+            remainder = len(skipped) - 8
+            skipped_text = (
+                f"\n\n将跳过 {len(skipped)} 个异常、未确认或已处理文件，不对它们做任何修改：\n"
+                f"{examples}"
+                + (f"\n• 另有 {remainder} 个…" if remainder > 0 else "")
+            )
         answer = QMessageBox.question(
             self,
             "执行批量重命名",
-            f"即将重命名 {len(self.documents)} 个原始 PDF。\n不会覆盖同名文件，操作记录将保存在首个PDF目录的“重命名日志”文件夹。\n\n确认继续吗？",
+            f"即将重命名 {len(eligible)} 个已人工确认的 PDF。"
+            f"{skipped_text}\n\n"
+            "不会覆盖同名文件，操作记录将保存在首个待重命名PDF目录的“重命名日志”文件夹。\n\n"
+            "确认继续吗？",
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        log_directory = self.documents[0].path.parent / "重命名日志"
-        logger.info("Batch rename confirmed by user: count=%s log_directory=%s", len(self.documents), log_directory)
+        log_directory = eligible[0].path.parent / "重命名日志"
+        logger.info(
+            "Batch rename confirmed by user: eligible=%s skipped=%s log_directory=%s",
+            len(eligible),
+            len(skipped),
+            log_directory,
+        )
         old_paths = {id(document): document.path for document in self.documents}
         self._invalidate_preview_render()
         try:
@@ -1829,16 +2088,25 @@ class MainWindow(QMainWindow):
         for document in self.documents:
             old_path = old_paths[id(document)]
             if document.path != old_path:
-                cached = self.base_images.pop(old_path, None)
-                if cached is not None:
-                    self._cache_base_image(document.path, cached)
+                self._move_cached_pages(old_path, document.path)
         success = sum(result.success for result in results)
-        logger.info("Batch rename finished: success=%s total=%s", success, len(results))
+        skipped_count = sum(result.skipped for result in results)
+        failed = len(results) - success - skipped_count
+        logger.info(
+            "Batch rename finished: success=%s failed=%s skipped=%s total=%s",
+            success,
+            failed,
+            skipped_count,
+            len(results),
+        )
         self._refresh_list()
         QMessageBox.warning(
             self,
             "重命名完成，请先检查",
-            f"成功重命名 {success}/{len(results)} 个文件。\n\n"
+            f"成功重命名 {success}/{len(eligible)} 个已确认文件。"
+            + (f"\n已跳过 {skipped_count} 个异常、未确认或已处理文件，它们未被修改。" if skipped_count else "")
+            + (f"\n另有 {failed} 个文件重命名失败，请查看日志。" if failed else "")
+            + "\n\n"
             "请先检查左侧显示的新文件名，并点击“历史记录”核对框选画面；"
             "确认无误后再移动这些PDF。\n\n"
             "如果发现单个错误：选中文件 → 重新框选 → 一键识别 → 点击“重命名选中文件”。\n\n"

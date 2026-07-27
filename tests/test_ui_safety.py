@@ -4,6 +4,7 @@ import threading
 import time
 from pathlib import Path
 
+import fitz
 from PIL import Image
 from PySide6.QtCore import QEvent, QRectF, Qt
 from PySide6.QtWidgets import QApplication, QGraphicsItem, QMessageBox, QPushButton
@@ -283,6 +284,124 @@ def test_full_page_preview_cache_is_limited_to_three_documents() -> None:
     assert len(window.base_images) == 3
     assert paths[0] not in window.base_images
     assert set(window.base_images) == set(paths[1:])
+    window.close()
+
+
+def test_multi_page_navigation_preserves_page_specific_boxes_and_crops(tmp_path: Path) -> None:
+    app = _application()
+    path = tmp_path / "multi-page.pdf"
+    pdf = fitz.open()
+    first_page = pdf.new_page(width=200, height=100)
+    first_page.draw_rect(first_page.rect, color=(1, 0, 0), fill=(1, 0, 0))
+    second_page = pdf.new_page(width=200, height=100)
+    second_page.draw_rect(second_page.rect, color=(0, 0, 1), fill=(0, 0, 1))
+    pdf.save(path)
+    pdf.close()
+
+    window = MainWindow()
+    document = DrawingDocument(path)
+    document.boxes = {
+        FieldKind.MATERIAL: NormalizedRect(0.2, 0.2, 0.3, 0.3),
+        FieldKind.NAME: NormalizedRect(0.2, 0.2, 0.3, 0.3),
+        FieldKind.PROCESS: NormalizedRect(0.55, 0.2, 0.3, 0.3),
+    }
+    document.box_pages = {
+        FieldKind.MATERIAL: 0,
+        FieldKind.NAME: 1,
+        FieldKind.PROCESS: 1,
+    }
+    window.documents = [document]
+    window.select_document(0)
+    app.processEvents()
+
+    assert document.page_count == 2
+    assert not window.page_navigation.isHidden()
+    assert set(window.preview.roi_items) == {FieldKind.MATERIAL}
+    assert "第 1 / 2 页" in window.page_label.text()
+
+    crops = window._capture_ocr_crops(document)
+    material_pixel = crops[FieldKind.MATERIAL].getpixel(
+        (crops[FieldKind.MATERIAL].width // 2, crops[FieldKind.MATERIAL].height // 2)
+    )
+    name_pixel = crops[FieldKind.NAME].getpixel(
+        (crops[FieldKind.NAME].width // 2, crops[FieldKind.NAME].height // 2)
+    )
+    assert material_pixel[0] > 240 and material_pixel[2] < 20
+    assert name_pixel[2] > 240 and name_pixel[0] < 20
+
+    window.change_page(1)
+    app.processEvents()
+    assert document.page_index == 1
+    assert set(window.preview.roi_items) == {FieldKind.NAME, FieldKind.PROCESS}
+    assert "第 2 / 2 页" in window.page_label.text()
+    window.close()
+
+
+def test_clear_file_list_keeps_pdf_and_resets_preview(tmp_path: Path, monkeypatch) -> None:
+    _application()
+    path = tmp_path / "keep-me.pdf"
+    path.write_bytes(b"pdf")
+    window = MainWindow()
+    document = DrawingDocument(path)
+    window.documents = [document]
+    window.current_index = 0
+    window._cache_base_image(path, Image.new("RGB", (400, 300), "white"))
+    window.preview.set_image(window.base_images[path])
+    window._refresh_list()
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+
+    window.clear_list_button.click()
+
+    assert path.is_file()
+    assert window.documents == []
+    assert window.file_list.count() == 0
+    assert window.preview.pixmap_item is None
+    assert window.base_images == {}
+    assert window.progress_label.text() == "尚未添加 PDF"
+    window.close()
+
+
+def test_batch_ui_renames_confirmed_file_and_warns_about_skipped_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _application()
+    confirmed_source = tmp_path / "confirmed.pdf"
+    abnormal_source = tmp_path / "abnormal.pdf"
+    confirmed_source.write_bytes(b"confirmed")
+    abnormal_source.write_bytes(b"abnormal")
+    confirmed = DrawingDocument(confirmed_source)
+    confirmed.status = DocumentStatus.CONFIRMED
+    confirmed.confirmed_filename = "B.001_泵体_CP41.100A.pdf"
+    abnormal = DrawingDocument(abnormal_source)
+    abnormal.status = DocumentStatus.ERROR
+    abnormal.error = "PDF无法打开"
+    window = MainWindow()
+    window.documents = [confirmed, abnormal]
+    window.current_index = 0
+    window._refresh_list()
+    messages: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+    monkeypatch.setattr(
+        QMessageBox,
+        "warning",
+        lambda _parent, title, message: messages.append((title, message)),
+    )
+
+    window.execute_rename()
+
+    assert (tmp_path / "B.001_泵体_CP41.100A.pdf").is_file()
+    assert abnormal_source.is_file()
+    assert abnormal.status == DocumentStatus.ERROR
+    assert any("已跳过 1 个" in message for _title, message in messages)
     window.close()
 
 

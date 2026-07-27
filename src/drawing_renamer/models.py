@@ -60,7 +60,11 @@ class DrawingDocument:
     path: Path
     original_path: Path | None = None
     rotation: int = 0
+    page_index: int = 0
+    page_count: int = 1
+    page_count_loaded: bool = False
     boxes: dict[FieldKind, NormalizedRect] = field(default_factory=dict)
+    box_pages: dict[FieldKind, int] = field(default_factory=dict)
     fields: dict[FieldKind, FieldValue] = field(
         default_factory=lambda: {kind: FieldValue() for kind in FieldKind}
     )
@@ -87,3 +91,8 @@ class DrawingDocument:
     @property
     def all_boxes_present(self) -> bool:
         return all(kind in self.boxes for kind in FieldKind)
+
+    def box_page(self, kind: FieldKind) -> int:
+        """Return the zero-based PDF page that owns one recognition box."""
+
+        return min(max(self.box_pages.get(kind, 0), 0), max(self.page_count - 1, 0))

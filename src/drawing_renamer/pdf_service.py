@@ -12,13 +12,28 @@ class PdfService:
     PREVIEW_DPI = 180
     MAX_DETAIL_DPI = 300
 
-    def render_first_page(self, path: Path, dpi: int = PREVIEW_DPI) -> Image.Image:
+    @staticmethod
+    def page_count(path: Path) -> int:
         with fitz.open(path) as document:
-            if document.page_count != 1:
-                raise ValueError(f"首版仅支持单页 PDF，当前文件有 {document.page_count} 页")
-            page = document[0]
+            if document.page_count < 1:
+                raise ValueError("PDF 中没有可显示的页面")
+            return document.page_count
+
+    def render_page(
+        self,
+        path: Path,
+        page_index: int = 0,
+        dpi: int = PREVIEW_DPI,
+    ) -> Image.Image:
+        with fitz.open(path) as document:
+            page = self._page_at(document, page_index)
             pixmap = page.get_pixmap(dpi=dpi, alpha=False)
             return Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+
+    def render_first_page(self, path: Path, dpi: int = PREVIEW_DPI) -> Image.Image:
+        """Compatibility wrapper retained for callers that explicitly want page one."""
+
+        return self.render_page(path, 0, dpi)
 
     def render_region(
         self,
@@ -26,6 +41,7 @@ class PdfService:
         rect: NormalizedRect,
         rotation: int = 0,
         dpi: int = MAX_DETAIL_DPI,
+        page_index: int = 0,
     ) -> Image.Image:
         """Render one visible region without allocating a high-resolution full page.
 
@@ -43,9 +59,7 @@ class PdfService:
         dpi = min(max(int(dpi), self.PREVIEW_DPI), self.MAX_DETAIL_DPI)
 
         with fitz.open(path) as document:
-            if document.page_count != 1:
-                raise ValueError(f"首版仅支持单页 PDF，当前文件有 {document.page_count} 页")
-            page = document[0]
+            page = self._page_at(document, page_index)
             page_rect = page.rect
             clip = fitz.Rect(
                 page_rect.x0 + source_rect.x * page_rect.width,
@@ -56,6 +70,16 @@ class PdfService:
             pixmap = page.get_pixmap(dpi=dpi, clip=clip, alpha=False)
             image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
         return self.rotate(image, rotation)
+
+    @staticmethod
+    def _page_at(document: fitz.Document, page_index: int) -> fitz.Page:
+        if document.page_count < 1:
+            raise ValueError("PDF 中没有可显示的页面")
+        if not 0 <= page_index < document.page_count:
+            raise ValueError(
+                f"PDF 页码超出范围：第 {page_index + 1} 页，共 {document.page_count} 页"
+            )
+        return document[page_index]
 
     @staticmethod
     def unrotate_normalized_rect(rect: NormalizedRect, degrees_ccw: int) -> NormalizedRect:

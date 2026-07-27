@@ -15,6 +15,7 @@ class RenameResult:
     destination: Path | None
     success: bool
     message: str
+    skipped: bool = False
 
 
 class RenameService:
@@ -23,7 +24,6 @@ class RenameService:
         reserved: set[Path] = set()
         for document in documents:
             if document.status != DocumentStatus.CONFIRMED:
-                errors.append(f"{document.path.name} 尚未人工确认")
                 continue
             filename = document.confirmed_filename
             problem = validate_destination(document.path, filename, reserved)
@@ -33,6 +33,11 @@ class RenameService:
         return errors
 
     def execute(self, documents: list[DrawingDocument], log_directory: Path) -> list[RenameResult]:
+        confirmed = [
+            document for document in documents if document.status == DocumentStatus.CONFIRMED
+        ]
+        if not confirmed:
+            raise ValueError("当前没有已人工确认、可重命名的文件")
         errors = self.validate_batch(documents)
         if errors:
             raise ValueError("\n".join(errors))
@@ -40,6 +45,17 @@ class RenameService:
         results: list[RenameResult] = []
         log_directory.mkdir(parents=True, exist_ok=True)
         for document in documents:
+            if document.status != DocumentStatus.CONFIRMED:
+                results.append(
+                    RenameResult(
+                        document.path,
+                        None,
+                        False,
+                        f"跳过：{document.status.value}",
+                        skipped=True,
+                    )
+                )
+                continue
             source = document.path
             destination = source.with_name(document.confirmed_filename)
             try:
@@ -104,7 +120,7 @@ class RenameService:
                     [
                         str(result.source),
                         str(result.destination or ""),
-                        "成功" if result.success else "失败",
+                        "跳过" if result.skipped else ("成功" if result.success else "失败"),
                         result.message,
                     ]
                 )

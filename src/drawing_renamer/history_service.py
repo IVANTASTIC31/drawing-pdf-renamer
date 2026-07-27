@@ -26,6 +26,8 @@ class HistoryEntry:
     fields: dict[str, dict[str, Any]]
     screenshot_path: Path
     json_path: Path
+    page_index: int = 0
+    page_count: int = 1
 
 
 class HistoryService:
@@ -52,9 +54,12 @@ class HistoryService:
             "proposed_filename": document.proposed_filename,
             "confirmed_filename": document.confirmed_filename,
             "rotation": document.rotation,
+            "page_index": document.page_index,
+            "page_count": document.page_count,
             "boxes": {
                 kind.value: {
                     "label": kind.label,
+                    "page": document.box_page(kind) + 1,
                     "x": rect.x,
                     "y": rect.y,
                     "width": rect.width,
@@ -149,6 +154,8 @@ class HistoryService:
             file_path=str(payload.get("file_path", "")),
             proposed_filename=str(payload.get("proposed_filename", "")),
             rotation=int(payload.get("rotation", 0)),
+            page_index=int(payload.get("page_index", 0)),
+            page_count=max(int(payload.get("page_count", 1)), 1),
             boxes=dict(payload.get("boxes", {})),
             fields=dict(payload.get("fields", {})),
             screenshot_path=json_path.parent / str(payload.get("screenshot", "")),

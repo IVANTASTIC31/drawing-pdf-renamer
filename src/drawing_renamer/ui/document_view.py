@@ -230,6 +230,19 @@ class DocumentGraphicsView(QGraphicsView):
         if previous_view is not None:
             self.restore_view_state(previous_view)
 
+    def clear_document(self) -> None:
+        """Clear the preview while keeping the graphics view reusable."""
+
+        self._detail_timer.stop()
+        self.scene().clear()
+        self.pixmap_item = None
+        self.high_res_item = None
+        self.roi_items.clear()
+        self._last_detail_request = None
+        self._drawing = False
+        self._draft = None
+        self.scene().setSceneRect(QRectF())
+
     def set_high_resolution_region(self, image: Image.Image, normalized: NormalizedRect) -> None:
         """Overlay a crisp visible-region render without changing scene coordinates."""
 

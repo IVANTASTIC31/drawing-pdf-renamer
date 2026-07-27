@@ -210,6 +210,7 @@ class HistoryDialog(QDialog):
             ("确认时路径", safe(entry.file_path)),
             ("原始路径", safe(entry.original_path)),
             ("图纸旋转", f"{entry.rotation}°"),
+            ("确认时页码", f"第 {entry.page_index + 1} / {entry.page_count} 页"),
             ("框选数据", safe(entry.json_path)),
         )
         metadata = "".join(
