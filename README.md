@@ -49,6 +49,9 @@ Windows 桌面小程序。用户在 PDF 预览中调整“物料编码、名称�
 - 批量重命名后，文件列表显示真实的新文件名，并提醒用户检查无误后再移动PDF
 - 已重命名文件支持重新框选、重新识别和“重命名选中文件”单独修正；重新载入后只要新名称与当前名称不同也可直接修正
 - 顶部“问题反馈日志”可查看运行日志并导出 ZIP 反馈包
+- 顶部“检查更新”每天自动连接一次公开的 GitHub Release；发现新版后由用户确认下载
+- 免安装版支持下载进度、SHA-256 校验、退出后自动替换、失败回滚和自动重启
+- 更新检查和下载不会上传PDF、识别内容、历史记录或日志；联网安装版下载后提示人工覆盖并重装依赖
 
 ## 开发运行
 
@@ -91,7 +94,7 @@ $env:PYTHONPATH = "src"
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install pyinstaller
-powershell -ExecutionPolicy Bypass -File .\release\build_release.ps1 -Version 0.1.2
+powershell -ExecutionPolicy Bypass -File .\release\build_release.ps1 -Version 0.1.3
 ```
 
 构建结果位于 `dist\release`。脚本仅按白名单复制运行文件，不会打包 `.venv`、Git 数据、

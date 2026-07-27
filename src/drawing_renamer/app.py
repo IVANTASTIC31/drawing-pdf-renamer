@@ -24,7 +24,7 @@ def configure_runtime_environment() -> None:
         os.environ["PADDLE_PDX_CACHE_HOME"] = str(bundled_cache)
 
 
-def main() -> int:
+def main(update_success_marker: Path | None = None) -> int:
     configure_runtime_environment()
     diagnostics = setup_diagnostics()
     logger = logging.getLogger("drawing_renamer.app")
@@ -38,6 +38,14 @@ def main() -> int:
         app.aboutToQuit.connect(lambda: mark_clean_exit(diagnostics))
         window = MainWindow(diagnostics)
         window.show()
+        if update_success_marker is not None:
+            try:
+                update_success_marker.parent.mkdir(parents=True, exist_ok=True)
+                update_success_marker.write_text("ok", encoding="ascii")
+                logger.info("Post-update startup marker written: %s", update_success_marker)
+            except OSError:
+                logger.exception("Unable to write post-update startup marker")
+        window.schedule_automatic_update_check()
         if diagnostics.previous_unclean_exit:
             QTimer.singleShot(
                 400,

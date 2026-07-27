@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from collections.abc import Callable
@@ -10,8 +12,8 @@ from queue import Empty, SimpleQueue
 from typing import Any
 
 from PIL import Image
-from PySide6.QtCore import QEvent, QTimer, Qt
-from PySide6.QtGui import QAction, QColor, QKeySequence, QShortcut
+from PySide6.QtCore import QEvent, QSettings, QTimer, QUrl, Qt
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -26,6 +28,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QSizePolicy,
     QSplitter,
@@ -36,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..diagnostics import DiagnosticsContext, app_data_directory
 from ..file_discovery import discover_pdfs, is_pdf_file
 from ..history_service import HistoryService
@@ -45,9 +49,18 @@ from ..naming import build_filename_from_fields, validate_destination
 from ..ocr_service import SuggestionResult
 from ..pdf_service import PdfService
 from ..rename_service import RenameService
+from ..update_service import (
+    PreparedUpdate,
+    UpdateCancelledError,
+    UpdateError,
+    UpdateInfo,
+    UpdateService,
+    distribution_edition,
+)
 from .document_view import COLORS, DocumentGraphicsView
 from .history_dialog import HistoryDialog
 from .log_dialog import LogDialog
+from .update_dialog import UpdateDialog
 
 
 logger = logging.getLogger("drawing_renamer.ui")
@@ -114,6 +127,17 @@ class MainWindow(QMainWindow):
         self._busy = False
         self._pending_close = False
         self._loading_fields = False
+        self.update_service = UpdateService()
+        self.update_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="updater")
+        self._update_future: Future[Any] | None = None
+        self._update_operation = ""
+        self._update_interactive = False
+        self._update_cancel = threading.Event()
+        self._update_progress_queue: SimpleQueue[tuple[int, int]] = SimpleQueue()
+        self._update_timer = QTimer(self)
+        self._update_timer.setInterval(100)
+        self._update_timer.timeout.connect(self._poll_update_operation)
+        self._update_progress_dialog: QProgressDialog | None = None
 
         self.field_edits: dict[FieldKind, QLineEdit] = {}
         self.field_confidence: dict[FieldKind, QLabel] = {}
@@ -174,6 +198,10 @@ class MainWindow(QMainWindow):
         help_action = QAction("使用说明", self)
         help_action.triggered.connect(self.show_usage_help)
         toolbar.addAction(help_action)
+        self.update_action = QAction("检查更新", self)
+        self.update_action.setToolTip(f"当前版本：v{__version__}")
+        self.update_action.triggered.connect(lambda: self.check_for_updates(interactive=True))
+        toolbar.addAction(self.update_action)
 
         root_splitter = QSplitter(Qt.Orientation.Horizontal)
         root_splitter.setChildrenCollapsible(False)
@@ -747,6 +775,187 @@ class MainWindow(QMainWindow):
         logger.info("Opening selection history dialog: root=%s", self.history.root)
         HistoryDialog(self.history, self).exec()
 
+    def schedule_automatic_update_check(self) -> None:
+        settings = QSettings()
+        try:
+            last_check = float(settings.value("updates/last_check", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            last_check = 0.0
+        if time.time() - last_check < 24 * 60 * 60:
+            return
+        QTimer.singleShot(3500, lambda: self.check_for_updates(interactive=False))
+
+    def check_for_updates(self, interactive: bool = True) -> None:
+        if self._update_future is not None:
+            if interactive:
+                self.statusBar().showMessage("更新任务正在运行，请稍候")
+            return
+        self._update_interactive = interactive
+        self._update_operation = "check"
+        self.update_action.setEnabled(False)
+        self.update_action.setText("正在检查更新…")
+        self.statusBar().showMessage("正在连接 GitHub 检查新版本…")
+        self._update_future = self.update_executor.submit(
+            self.update_service.check,
+            __version__,
+            distribution_edition(),
+        )
+        self._update_timer.start()
+
+    def _offer_update(self, info: UpdateInfo) -> None:
+        self.update_action.setText(f"发现新版本 v{info.version}")
+        dialog = UpdateDialog(__version__, info, self)
+        if dialog.exec() == UpdateDialog.DialogCode.Accepted:
+            self._start_update_download(info)
+
+    def _start_update_download(self, info: UpdateInfo) -> None:
+        if self._busy or self._background_ocr_active:
+            QMessageBox.information(
+                self,
+                "暂时不能更新",
+                "当前OCR识别任务尚未结束。请等待识别完成或取消识别后再更新。",
+            )
+            return
+        pending_documents = [
+            document for document in self.documents if document.status != DocumentStatus.RENAMED
+        ]
+        if pending_documents:
+            answer = QMessageBox.question(
+                self,
+                "确认下载更新",
+                "安装更新时软件会自动关闭。\n"
+                "当前尚未重命名的框选和识别状态不会自动恢复，请先确认重要内容已经处理完成。\n\n"
+                "是否继续下载更新？",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+
+        self._update_cancel.clear()
+        self._update_operation = "download"
+        self._update_progress_dialog = QProgressDialog(
+            "正在下载安装包…",
+            "取消下载",
+            0,
+            1000,
+            self,
+        )
+        self._update_progress_dialog.setWindowTitle(f"更新到 v{info.version}")
+        self._update_progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self._update_progress_dialog.setAutoClose(False)
+        self._update_progress_dialog.setAutoReset(False)
+        self._update_progress_dialog.canceled.connect(self._update_cancel.set)
+        self._update_progress_dialog.show()
+        update_root = (
+            self.diagnostics.data_directory if self.diagnostics else app_data_directory()
+        ) / "updates"
+        self._update_future = self.update_executor.submit(
+            self.update_service.download_and_prepare,
+            info,
+            update_root,
+            lambda downloaded, total: self._update_progress_queue.put((downloaded, total)),
+            self._update_cancel.is_set,
+        )
+        self._update_timer.start()
+
+    def _poll_update_operation(self) -> None:
+        while True:
+            try:
+                downloaded, total = self._update_progress_queue.get_nowait()
+            except Empty:
+                break
+            dialog = self._update_progress_dialog
+            if dialog is not None:
+                if total > 0:
+                    dialog.setValue(min(1000, int(downloaded * 1000 / total)))
+                    dialog.setLabelText(
+                        f"正在下载：{downloaded / 1024 / 1024:.1f} MB / "
+                        f"{total / 1024 / 1024:.1f} MB"
+                    )
+                else:
+                    dialog.setLabelText(
+                        f"正在下载：{downloaded / 1024 / 1024:.1f} MB"
+                    )
+
+        future = self._update_future
+        if future is None or not future.done():
+            return
+        operation = self._update_operation
+        interactive = self._update_interactive
+        self._update_future = None
+        self._update_operation = ""
+        self._update_timer.stop()
+        self.update_action.setEnabled(True)
+        if self._update_progress_dialog is not None:
+            self._update_progress_dialog.close()
+            self._update_progress_dialog.deleteLater()
+            self._update_progress_dialog = None
+
+        try:
+            result = future.result()
+        except UpdateCancelledError:
+            logger.info("Update download cancelled by user")
+            self.update_action.setText("检查更新")
+            self.statusBar().showMessage("已取消更新下载")
+            return
+        except UpdateError as exc:
+            logger.warning("Update operation failed: operation=%s error=%s", operation, exc)
+            self.update_action.setText("检查更新")
+            self.statusBar().showMessage(str(exc))
+            if interactive or operation == "download":
+                QMessageBox.warning(self, "更新失败", str(exc))
+            return
+        except Exception as exc:  # pragma: no cover - unexpected network/runtime boundary
+            logger.exception("Unexpected update operation failure: operation=%s", operation)
+            self.update_action.setText("检查更新")
+            self.statusBar().showMessage("更新过程发生未知错误")
+            if interactive or operation == "download":
+                QMessageBox.warning(self, "更新失败", f"更新过程发生未知错误：{exc}")
+            return
+
+        if operation == "check":
+            QSettings().setValue("updates/last_check", time.time())
+            if result is None:
+                self.update_action.setText("检查更新")
+                self.statusBar().showMessage(f"当前已是最新版本 v{__version__}")
+                if interactive:
+                    QMessageBox.information(
+                        self,
+                        "检查更新",
+                        f"当前已是最新版本 v{__version__}。",
+                    )
+                return
+            self.statusBar().showMessage(f"发现新版本 v{result.version}")
+            self._offer_update(result)
+            return
+
+        if operation == "download":
+            self._install_prepared_update(result)
+
+    def _install_prepared_update(self, prepared: PreparedUpdate) -> None:
+        if distribution_edition() != "portable":
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(prepared.archive_path)))
+            QMessageBox.information(
+                self,
+                "安装包已下载",
+                "联网安装版的新版压缩包已经下载并打开。\n\n"
+                "请关闭本程序，解压覆盖程序文件，然后重新运行“安装依赖.bat”。",
+            )
+            self.update_action.setText(f"已下载 v{prepared.info.version}")
+            return
+
+        data_directory = (
+            self.diagnostics.data_directory if self.diagnostics else app_data_directory()
+        )
+        try:
+            self.update_service.launch_portable_installer(prepared, data_directory)
+        except UpdateError as exc:
+            logger.warning("Unable to launch portable installer: %s", exc)
+            QMessageBox.warning(self, "无法安装更新", str(exc))
+            self.update_action.setText("检查更新")
+            return
+        self.statusBar().showMessage("新版已下载，正在关闭程序并完成更新…")
+        QTimer.singleShot(100, self.close)
+
     def _save_history_snapshot(self, document: DrawingDocument, event_type: str) -> None:
         payload = self.history.create_payload(document, event_type)
         proposed_filename = document.proposed_filename
@@ -792,7 +1001,8 @@ class MainWindow(QMainWindow):
             "11. 左侧显示“等待识别、识别中、待确认”；后台完成后必须返回该文件人工核对，再点击“确认并下一份”。\n"
             "12. OCR失败时，可以直接在下方输入框手工填写。确认时会保存现场画面和框选数据，可从左上角“历史记录”查看。\n"
             "13. 批量重命名后请先检查新文件名再移动PDF。发现错误时，选中文件、重新框选和识别，"
-            "然后点击“重命名选中文件”。\n\n"
+            "然后点击“重命名选中文件”。\n"
+            "14. 顶部“检查更新”可手动检查正式版；程序每天最多自动检查一次，下载安装前会要求确认。\n\n"
             "快捷键：1=物料编码，2=名称，3=工序编号，A=左转90°，D=右转90°，"
             "空格=执行蓝色主按钮，Esc=退出框选。\n"
             "输入框正在编辑时，单键快捷键不会触发；点击窗口其他区域即可退出输入状态。",
@@ -1657,11 +1867,14 @@ class MainWindow(QMainWindow):
         self._worker_timer.stop()
         self._ocr_queue_timer.stop()
         self._preview_timer.stop()
+        self._update_timer.stop()
+        self._update_cancel.set()
         self._pending_preview_request = None
         self._preview_request_serial += 1
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.ocr_queue_executor.shutdown(wait=False, cancel_futures=True)
         self.preview_executor.shutdown(wait=False, cancel_futures=True)
+        self.update_executor.shutdown(wait=False, cancel_futures=True)
         self.history_executor.shutdown(wait=True, cancel_futures=False)
         application = QApplication.instance()
         if application is not None:
