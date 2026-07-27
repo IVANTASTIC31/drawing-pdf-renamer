@@ -94,7 +94,7 @@ $env:PYTHONPATH = "src"
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install pyinstaller
-powershell -ExecutionPolicy Bypass -File .\release\build_release.ps1 -Version 0.1.3
+powershell -ExecutionPolicy Bypass -File .\release\build_release.ps1 -Version 0.1.4
 ```
 
 构建结果位于 `dist\release`。脚本仅按白名单复制运行文件，不会打包 `.venv`、Git 数据、

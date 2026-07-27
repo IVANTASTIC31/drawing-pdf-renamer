@@ -5,14 +5,18 @@ import json
 import logging
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import urllib.error
 import urllib.request
 import zipfile
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
+
+import certifi
 
 from .subprocess_visibility import hidden_window_options
 
@@ -77,8 +81,17 @@ def parse_version(value: str) -> tuple[int, int, int]:
     return tuple(int(part) for part in parts)  # type: ignore[return-value]
 
 
+@lru_cache(maxsize=1)
+def _ssl_context() -> ssl.SSLContext:
+    """Combine Windows trusted roots with the CA bundle shipped in the app."""
+
+    context = ssl.create_default_context()
+    context.load_verify_locations(cafile=certifi.where())
+    return context
+
+
 def _open_url(request: urllib.request.Request, timeout: float):
-    return urllib.request.urlopen(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout, context=_ssl_context())
 
 
 def _request_bytes(url: str, timeout: float = 10.0) -> bytes:
@@ -90,6 +103,12 @@ def _request_bytes(url: str, timeout: float = 10.0) -> bytes:
         raise UpdateError(f"更新服务器返回错误：HTTP {exc.code}") from exc
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", exc)
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            raise UpdateError(
+                "HTTPS证书校验失败。请先确认电脑日期时间正确，并安装最新的Windows根证书；"
+                "如果公司网络使用HTTPS代理，请联系网管确认企业根证书已安装。"
+                f"详细错误：{reason}"
+            ) from exc
         raise UpdateError(f"无法连接更新服务器：{reason}") from exc
     except TimeoutError as exc:
         raise UpdateError("连接更新服务器超时") from exc

@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import ssl
+import urllib.error
 import zipfile
 from pathlib import Path
 
@@ -57,6 +59,59 @@ def test_parse_version_accepts_release_tag_and_rejects_invalid_value() -> None:
     assert parse_version("1.2.3") == (1, 2, 3)
     with pytest.raises(ValueError):
         parse_version("1.2")
+
+
+def test_ssl_context_combines_system_and_bundled_ca(monkeypatch, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    ca_file = tmp_path / "cacert.pem"
+    ca_file.write_text("test", encoding="ascii")
+    loaded: list[str] = []
+
+    class FakeContext:
+        def load_verify_locations(self, *, cafile: str) -> None:
+            loaded.append(cafile)
+
+    update_service._ssl_context.cache_clear()
+    monkeypatch.setattr(update_service.ssl, "create_default_context", FakeContext)
+    monkeypatch.setattr(update_service.certifi, "where", lambda: str(ca_file))
+
+    assert update_service._ssl_context() is not None
+    assert loaded == [str(ca_file)]
+    update_service._ssl_context.cache_clear()
+
+
+def test_open_url_uses_combined_ssl_context(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    sentinel = object()
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(update_service, "_ssl_context", lambda: sentinel)
+    monkeypatch.setattr(
+        update_service.urllib.request,
+        "urlopen",
+        lambda request, **kwargs: calls.append(kwargs),
+    )
+
+    update_service._open_url(
+        update_service.urllib.request.Request("https://example.invalid"),
+        7.0,
+    )
+
+    assert calls == [{"timeout": 7.0, "context": sentinel}]
+
+
+def test_certificate_error_has_actionable_message(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    certificate_error = ssl.SSLCertVerificationError(
+        1,
+        "unable to get local issuer certificate",
+    )
+    monkeypatch.setattr(
+        update_service,
+        "_open_url",
+        lambda request, timeout: (_ for _ in ()).throw(
+            urllib.error.URLError(certificate_error)
+        ),
+    )
+
+    with pytest.raises(UpdateError, match="Windows根证书"):
+        update_service._request_bytes("https://example.invalid")
 
 
 def test_check_selects_matching_edition_and_digest(monkeypatch) -> None:  # type: ignore[no-untyped-def]
